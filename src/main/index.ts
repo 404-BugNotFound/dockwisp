@@ -720,6 +720,25 @@ void app.whenReady().then(async () => {
     for (const match of matches) lastMatches.set(match.id, match);
   };
 
+  /** Rebuild the in-memory app index after an external install/uninstall. */
+  const refreshApplications = (): void => {
+    applications = buildApplicationIndex(
+      settingsStore.get().customLaunchItems,
+      pinnedAppPaths(settingsStore.get().pinnedMatches),
+    );
+    launcher?.webContents.send("launcher:index-updated");
+  };
+
+  /**
+   * A stale result (for example an app uninstalled while Dockwisp was running)
+   * fails to open. Rebuild the app index and invalidate file results so the next
+   * search no longer lists the removed path.
+   */
+  const refreshAfterOpenFailure = (): void => {
+    refreshApplications();
+    fileSearch.invalidate();
+  };
+
   /** Build the pinned home page from stored snapshots, with refreshed icons. */
   const homeMatches = async (): Promise<SearchMatch[]> => {
     const pinned = settingsStore.get().pinnedMatches;
@@ -970,15 +989,12 @@ void app.whenReady().then(async () => {
     if (!nonActionable) {
       usage.record(match.id);
     }
-    if (match.kind === "file") {
+    if (match.kind === "file" || match.kind === "app") {
       const error = await shell.openPath(match.path);
-      if (error) throw new Error(error);
-      launcher?.hide();
-      return true;
-    }
-    if (match.kind === "app") {
-      const error = await shell.openPath(match.path);
-      if (error) throw new Error(error);
+      if (error) {
+        refreshAfterOpenFailure();
+        throw new Error(`无法打开「${match.title}」：${error}。索引已刷新，请重新搜索。`);
+      }
       launcher?.hide();
       return true;
     }
@@ -1059,7 +1075,13 @@ void app.whenReady().then(async () => {
       try {
         if (action === "open") {
           const error = await shell.openPath(original);
-          if (error) return { ok: false, message: error };
+          if (error) {
+            refreshAfterOpenFailure();
+            return {
+              ok: false,
+              message: `无法打开「${match.title}」：${error}。索引已刷新，请重新搜索。`,
+            };
+          }
           return { ok: true, hide: true };
         }
         if (action === "reveal") {
@@ -1251,10 +1273,7 @@ void app.whenReady().then(async () => {
     return true;
   });
   ipcMain.handle("launcher:refresh", () => {
-    applications = buildApplicationIndex(
-      settingsStore.get().customLaunchItems,
-      pinnedAppPaths(settingsStore.get().pinnedMatches),
-    );
+    refreshApplications();
     fileSearch.invalidate();
     void currency.refresh();
     registry.reload();
