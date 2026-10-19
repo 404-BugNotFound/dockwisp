@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="dw-bg" cx="50%" cy="36%" r="78%">
+      <stop offset="0%" stop-color="#17263f"/>
+      <stop offset="58%" stop-color="#0B1220"/>
+      <stop offset="100%" stop-color="#070C16"/>
+    </radialGradient>
+    <linearGradient id="dw-flame" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#2DD4BF"/>
+      <stop offset="52%" stop-color="#5EEAD4"/>
+      <stop offset="100%" stop-color="#FBBF24"/>
+    </linearGradient>
+    <linearGradient id="dw-core" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#5EEAD4"/>
+      <stop offset="100%" stop-color="#F8FAFC"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#dw-bg)"/>
+  <rect x="17" y="17" width="478" height="478" rx="111" fill="none" stroke="#5EEAD4" stroke-opacity="0.14" stroke-width="2"/>
+  <path d="M176 338 Q176 392 256 392 Q336 392 336 338" fill="none" stroke="#5EEAD4" stroke-width="26" stroke-linecap="round"/>
+  <path d="M278 116 C330 196 310 282 276 332 C269 344 247 344 240 332 C204 276 214 194 278 116 Z" fill="url(#dw-flame)"/>
+  <path d="M272 178 C300 224 290 282 268 316 C263 324 251 324 246 316 C228 282 236 224 272 178 Z" fill="url(#dw-core)" opacity="0.9"/>
+  <circle cx="312" cy="92" r="13" fill="#FBBF24"/>
+  <circle cx="312" cy="92" r="24" fill="#FBBF24" opacity="0.18"/>
+</svg>

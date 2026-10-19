@@ -1,0 +1,95 @@
+{
+  "name": "dockwisp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A clean-room Windows launcher with a plugin host.",
+  "author": "Dockwisp contributors",
+  "license": "MIT",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "postinstall": "node node_modules/electron/install.js",
+    "clean": "node scripts/clean.mjs",
+    "build:native": "native\\build.cmd",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "npm run clean && npm run build:native && npm run build:ts && node scripts/copy-static.mjs",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/tests/*.test.js",
+    "test:native": "node scripts/test-native.mjs",
+    "test:translation-live": "node scripts/check-translation.mjs",
+    "test:smoke": "npm run build && node scripts/run-electron.mjs --smoke-test",
+    "verify": "npm run test && npm run build && npm run test:native && node scripts/run-electron.mjs --smoke-test",
+    "start": "npm run build && node scripts/run-electron.mjs",
+    "dev": "npm run build && node scripts/run-electron.mjs --dev",
+    "dist": "npm run verify && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "@electron/asar": "4.3.1",
+    "pinyin-pro": "3.29.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "electron": "43.8.0",
+    "electron-builder": "26.15.3",
+    "typescript": "7.0.2"
+  },
+  "build": {
+    "appId": "cn.dockwisp.shell",
+    "productName": "Dockwisp",
+    "directories": {
+      "output": "release"
+    },
+    "artifactName": "Dockwisp-${version}-${arch}.${ext}",
+    "files": [
+      "dist/**/*",
+      "package.json",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md"
+    ],
+    "extraResources": [
+      {
+        "from": "native/bin/mouse-hook.exe",
+        "to": "native/mouse-hook.exe"
+      },
+      {
+        "from": "native/bin/everything-search.exe",
+        "to": "native/everything-search.exe"
+      },
+      {
+        "from": "native/bin/Everything64.dll",
+        "to": "native/Everything64.dll"
+      },
+      {
+        "from": "native/portable/Everything.exe",
+        "to": "native/Everything.exe"
+      },
+      {
+        "from": "native/portable/Everything.lng",
+        "to": "native/Everything.lng"
+      },
+      {
+        "from": "native/sdk/License.txt",
+        "to": "native/Everything-SDK-License.txt"
+      },
+      {
+        "from": "native/portable/License.txt",
+        "to": "native/Everything-License.txt"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

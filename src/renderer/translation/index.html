@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>翻译</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <section class="translation-card">
+      <header>
+        <span class="translate-mark">译</span>
+        <div><strong>即时翻译</strong><span id="meta">正在识别语言</span></div>
+        <span class="spacer"></span>
+        <button id="pin" type="button">固定</button>
+        <button id="close" class="icon-button" type="button" aria-label="关闭">×</button>
+      </header>
+      <main>
+        <p id="source"></p>
+        <p id="translated" aria-live="polite">正在翻译…</p>
+        <p id="error" role="alert"></p>
+      </main>
+      <footer><button id="copy" type="button">复制译文</button></footer>
+    </section>
+  </body>
+</html>

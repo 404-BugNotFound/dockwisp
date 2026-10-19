@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist-test",
+    "noEmit": false
+  },
+  "include": [
+    "src/core/**/*.ts",
+    "src/translation/**/*.ts",
+    "src/main/plugin-store.ts",
+    "src/main/plugin-package.ts",
+    "src/main/settings.ts",
+    "src/main/usage-store.ts",
+    "tests/**/*.ts"
+  ]
+}

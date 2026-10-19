@@ -1,0 +1,37 @@
+{
+  "name": "compat-smoke",
+  "version": "1.0.0",
+  "pluginName": "兼容性测试插件",
+  "main": "index.html",
+  "preload": "preload.js",
+  "features": [
+    {
+      "code": "home",
+      "description": "Dockwisp 插件兼容性测试",
+      "cmds": ["兼容性测试", "Dockwisp Test"]
+    },
+    {
+      "code": "url",
+      "description": "匹配 URL",
+      "cmds": [
+        {
+          "type": "regex",
+          "label": "测试 URL 匹配",
+          "match": "/^https?:\\/\\//i"
+        }
+      ]
+    },
+    {
+      "code": "markdown",
+      "description": "匹配 Markdown 文件",
+      "cmds": [
+        {
+          "type": "files",
+          "label": "测试 Markdown 文件",
+          "fileType": "file",
+          "extensions": ["md"]
+        }
+      ]
+    }
+  ]
+}

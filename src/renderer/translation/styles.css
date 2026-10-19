@@ -1,0 +1,55 @@
+:root {
+  color-scheme: light dark;
+  font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  --surface: rgba(250, 250, 253, 0.96);
+  --surface-2: rgba(238, 239, 247, 0.9);
+  --text: #20212a;
+  --muted: #76798a;
+  --line: rgba(31, 35, 48, 0.08);
+  --accent: #6c5ce7;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: rgba(31, 32, 41, 0.96);
+    --surface-2: rgba(49, 51, 64, 0.92);
+    --text: #f6f5fa;
+    --muted: #a8a9b7;
+    --line: rgba(255,255,255,.08);
+    --accent: #9b8cff;
+  }
+}
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; color: var(--text); }
+body { padding: 10px; }
+button { font: inherit; color: inherit; }
+.translation-card {
+  width: 100%; height: 100%; display: grid; grid-template-rows: auto 1fr auto;
+  overflow: hidden; border: 1px solid rgba(255,255,255,.35); border-radius: 19px;
+  background: var(--surface); backdrop-filter: blur(26px) saturate(130%);
+  box-shadow: 0 20px 52px rgba(24,21,48,.3), 0 3px 13px rgba(24,21,48,.14);
+}
+header, footer { display: flex; align-items: center; gap: 9px; padding: 10px 12px; }
+header { border-bottom: 1px solid var(--line); -webkit-app-region: drag; }
+header button { -webkit-app-region: no-drag; }
+.translate-mark {
+  width: 31px; height: 31px; display: grid; place-items: center; border-radius: 10px;
+  color: #fff; font-weight: 750; background: linear-gradient(145deg, #8d7cf8, #5d49da);
+  box-shadow: 0 7px 16px rgba(108,92,231,.28);
+}
+header div { display: grid; gap: 1px; }
+header strong { font-size: 12px; }
+#meta { color: var(--muted); font-size: 9px; }
+.spacer { flex: 1; }
+button { border: 0; border-radius: 9px; padding: 5px 10px; background: var(--surface-2); cursor: pointer; font-size: 10px; }
+button:hover { background: rgba(108,92,231,.14); }
+.icon-button { width: 28px; height: 28px; padding: 0; font-size: 17px; background: transparent; color: var(--muted); }
+main { padding: 11px 14px 6px; overflow-y: auto; }
+#source {
+  max-height: 34px; margin: 0 0 9px; overflow: hidden; color: var(--muted);
+  font-size: 10px; line-height: 1.5;
+}
+#translated { margin: 0; white-space: pre-wrap; font-size: 15px; font-weight: 550; line-height: 1.55; }
+#error { margin: 0; color: #d84b55; font-size: 12px; }
+footer { justify-content: flex-end; padding-top: 5px; }
+#copy { padding: 6px 13px; color: #fff; background: linear-gradient(135deg, #8d7cf8, #6652df); box-shadow: 0 6px 14px rgba(108,92,231,.22); }
+#copy:disabled { opacity: .45; box-shadow: none; cursor: default; }

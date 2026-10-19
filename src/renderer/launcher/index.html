@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' file:; img-src 'self' file: data:; style-src 'self'; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dockwisp</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <main id="launcher" class="shell">
+      <div class="search-bar" id="search-bar">
+        <input
+          id="query"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="搜索应用、插件，或输入 文件 搜索文件"
+          aria-label="搜索"
+        />
+      </div>
+
+      <div id="home" class="home" hidden aria-label="已固定"></div>
+      <ol id="results" class="results" hidden aria-label="搜索结果"></ol>
+
+      <div id="toast" class="toast" hidden role="status"></div>
+
+      <div id="context-menu" class="context-menu" hidden role="menu"></div>
+    </main>
+
+    <section id="settings" class="shell settings-shell" hidden>
+      <div class="titlebar">
+        <span class="brand-mark">O</span>
+        <div>
+          <div class="brand-name">偏好设置</div>
+          <div class="title-caption">呼出方式、翻译与插件</div>
+        </div>
+        <span class="drag-space"></span>
+        <button id="settings-back" class="soft-button" type="button">完成</button>
+      </div>
+
+      <div class="settings-body">
+        <article class="setting-card accent-card launch-card">
+          <div class="card-heading">
+            <span class="card-icon">⌨</span>
+            <div><h2>呼出与启动</h2><p>配置全局入口和系统行为</p></div>
+          </div>
+          <div class="field-grid">
+            <label>
+              <span>全局快捷键</span>
+              <input id="hotkey" type="text" placeholder="Alt+Space" />
+            </label>
+            <label class="toggle-row">
+              <span><strong>开机启动</strong><small>登录 Windows 后自动运行</small></span>
+              <input id="launch-at-login" type="checkbox" class="toggle" />
+            </label>
+          </div>
+          <div class="health-row">
+            <span id="hotkey-state" class="health-badge">快捷键状态未知</span>
+            <span id="helper-state" class="health-badge">输入服务状态未知</span>
+          </div>
+        </article>
+
+        <article class="setting-card translation-settings-card">
+          <div class="card-heading">
+            <span class="card-icon purple">译</span>
+            <div><h2>长按中键翻译</h2><p>长按中键读取选区并显示译文</p></div>
+          </div>
+          <label class="toggle-row prominent-toggle">
+            <span><strong>启用自动翻译</strong><small>选中文本后长按鼠标中键</small></span>
+            <input id="translation-enabled" type="checkbox" class="toggle" />
+          </label>
+          <div class="two-columns">
+            <label>
+              <span>长按阈值</span>
+              <div class="input-with-suffix"><input id="long-press" type="number" min="250" max="3000" step="50" /><em>ms</em></div>
+            </label>
+            <label>
+              <span>翻译提供器</span>
+              <select id="translation-provider">
+                <option value="mymemory">MyMemory · 免 Key</option>
+                <option value="libretranslate">LibreTranslate</option>
+              </select>
+            </label>
+          </div>
+          <label><span>接口地址</span><input id="translation-endpoint" type="url" /></label>
+          <label><span>API Key <small>可选</small></span><input id="translation-key" type="password" autocomplete="off" /></label>
+          <label><span>进程黑名单 <small>每行一个 exe</small></span><textarea id="process-blacklist" rows="2" placeholder="game.exe"></textarea></label>
+          <div id="translation-diagnostics" class="diagnostic-box">尚无中键诊断数据</div>
+        </article>
+
+        <article class="setting-card plugin-card">
+          <div class="card-heading">
+            <span class="card-icon green">✦</span>
+            <div><h2>内容与插件</h2><p>扩展本地搜索来源和兼容插件</p></div>
+          </div>
+          <div class="action-grid">
+            <button id="add-item" type="button"><span>＋</span><strong>添加本地项目</strong><small>应用、文件或目录</small></button>
+            <button id="add-plugin" type="button"><span>⌁</span><strong>添加插件目录</strong><small>开发与调试插件</small></button>
+            <button id="install-plugin" type="button"><span>↓</span><strong>安装离线插件</strong><small>UPX / UPXS</small></button>
+            <button id="refresh-index" type="button"><span>↻</span><strong>刷新索引</strong><small>重新扫描全部来源</small></button>
+            <button id="clear-usage" type="button"><span>⌫</span><strong>清空使用统计</strong><small>重置频率排序</small></button>
+          </div>
+        </article>
+
+        <div class="settings-footer">
+          <pre id="settings-status" role="status"></pre>
+          <button id="save-settings" class="primary-button" type="button">保存更改</button>
+        </div>
+      </div>
+    </section>
+  </body>
+</html>
