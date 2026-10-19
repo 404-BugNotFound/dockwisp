@@ -4,7 +4,7 @@ import path from "node:path";
 export function createLauncherWindow(): BrowserWindow {
   const window = new BrowserWindow({
     width: 780,
-    height: 72,
+    height: 64,
     show: false,
     frame: false,
     resizable: false,

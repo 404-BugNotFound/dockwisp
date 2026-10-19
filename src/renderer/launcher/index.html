@@ -14,14 +14,29 @@
   <body>
     <main id="launcher" class="shell">
       <div class="search-bar" id="search-bar">
+        <svg class="search-glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <circle cx="11" cy="11" r="7" />
+          <line x1="16.4" y1="16.4" x2="21" y2="21" />
+        </svg>
         <input
           id="query"
           type="text"
           autocomplete="off"
           spellcheck="false"
-          placeholder="搜索应用、插件，或输入 文件 搜索文件"
+          placeholder="Dockwisp · 搜索应用、文件或命令"
           aria-label="搜索"
         />
+        <button
+          id="open-settings"
+          class="brand-button"
+          type="button"
+          aria-label="打开设置"
+          title="打开设置"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z" />
+          </svg>
+        </button>
       </div>
 
       <div id="home" class="home" hidden aria-label="已固定"></div>
@@ -34,7 +49,11 @@
 
     <section id="settings" class="shell settings-shell" hidden>
       <div class="titlebar">
-        <span class="brand-mark">O</span>
+        <span class="brand-mark">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z" />
+          </svg>
+        </span>
         <div>
           <div class="brand-name">偏好设置</div>
           <div class="title-caption">呼出方式、翻译与插件</div>
@@ -44,7 +63,7 @@
       </div>
 
       <div class="settings-body">
-        <article class="setting-card accent-card launch-card">
+        <article class="setting-card launch-card">
           <div class="card-heading">
             <span class="card-icon">⌨</span>
             <div><h2>呼出与启动</h2><p>配置全局入口和系统行为</p></div>
@@ -63,11 +82,19 @@
             <span id="hotkey-state" class="health-badge">快捷键状态未知</span>
             <span id="helper-state" class="health-badge">输入服务状态未知</span>
           </div>
+          <div class="appearance-row">
+            <span>外观</span>
+            <div class="theme-switch" id="theme-choices" role="group" aria-label="外观主题">
+              <button type="button" data-theme-choice="system" aria-pressed="true">跟随系统</button>
+              <button type="button" data-theme-choice="light" aria-pressed="false">浅色</button>
+              <button type="button" data-theme-choice="dark" aria-pressed="false">深色</button>
+            </div>
+          </div>
         </article>
 
         <article class="setting-card translation-settings-card">
           <div class="card-heading">
-            <span class="card-icon purple">译</span>
+            <span class="card-icon">译</span>
             <div><h2>长按中键翻译</h2><p>长按中键读取选区并显示译文</p></div>
           </div>
           <label class="toggle-row prominent-toggle">
@@ -95,7 +122,7 @@
 
         <article class="setting-card plugin-card">
           <div class="card-heading">
-            <span class="card-icon green">✦</span>
+            <span class="card-icon">✦</span>
             <div><h2>内容与插件</h2><p>扩展本地搜索来源和兼容插件</p></div>
           </div>
           <div class="action-grid">

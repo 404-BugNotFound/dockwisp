@@ -30,6 +30,16 @@ test("normalizes and rewrites settings", () => {
   assert.equal(reopened.longPressMs, 3_000);
 });
 
+test("persists and normalizes theme preference", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "dockwisp-theme-"));
+  const settings = new SettingsStore(root);
+  assert.equal(settings.get().theme, "system");
+  settings.update({ theme: "dark" });
+  assert.equal(new SettingsStore(root).get().theme, "dark");
+  settings.update({ theme: "neon" as never });
+  assert.equal(new SettingsStore(root).get().theme, "system");
+});
+
 test("persists, dedupes and caps pinned matches", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "dockwisp-pins-"));
   const settings = new SettingsStore(root);

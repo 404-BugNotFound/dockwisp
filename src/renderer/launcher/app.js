@@ -1,3 +1,41 @@
+const THEME_VALUES = ["system", "light", "dark"];
+const THEME_CACHE_KEY = "dockwisp.theme";
+
+function normalizeTheme(value) {
+  return THEME_VALUES.includes(value) ? value : "system";
+}
+
+function readCachedTheme() {
+  try {
+    return normalizeTheme(window.localStorage.getItem(THEME_CACHE_KEY));
+  } catch {
+    return "system";
+  }
+}
+
+function applyTheme(theme) {
+  const next = normalizeTheme(theme);
+  // Explicitly set data-theme even for "system" so the CSS system branch applies.
+  document.documentElement.dataset.theme = next;
+  const choices = document.querySelector("#theme-choices");
+  if (choices) {
+    const buttons = choices.querySelectorAll("[data-theme-choice]");
+    buttons.forEach((button) => {
+      const active = button.dataset.themeChoice === next;
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+      button.classList.toggle("is-active", active);
+    });
+  }
+  try {
+    window.localStorage.setItem(THEME_CACHE_KEY, next);
+  } catch {
+    // Ignore storage failures (private mode / disabled storage).
+  }
+}
+
+// Apply the cached theme before any DOM query to minimize first-paint flicker.
+applyTheme(readCachedTheme());
+
 const api = window.dockwisp;
 const launcher = document.querySelector("#launcher");
 const settingsPanel = document.querySelector("#settings");
@@ -12,8 +50,8 @@ const FILE_PREFIXES = ["文件 ", "file "];
 const FILE_MODE_RE = /^(?:文件|file)\s+/i;
 const MAX_VISIBLE_ROWS = 8;
 const ROW_HEIGHT = 64; // one result row incl. margin
-const BAR_HEIGHT = 66;
-const LIST_PADDING = 18; // results top+bottom padding
+const BAR_HEIGHT = 64;
+const LIST_PADDING = 20; // results top+bottom padding (8px top + 12px bottom)
 const SETTINGS_HEIGHT = 600;
 
 let matches = [];
@@ -107,7 +145,7 @@ function desiredHeight() {
     return Math.round(BAR_HEIGHT + rows * ROW_HEIGHT + LIST_PADDING);
   }
   // Compact: just the search bar
-  return BAR_HEIGHT + 6;
+  return BAR_HEIGHT;
 }
 
 function applyResize() {
@@ -551,6 +589,7 @@ async function openSettings() {
   lastResizeHeight = 0;
   api.resize(SETTINGS_HEIGHT);
   const settings = await api.getSettings();
+  applyTheme(settings.theme);
   document.querySelector("#hotkey").value = settings.hotkey;
   document.querySelector("#long-press").value = settings.longPressMs;
   document.querySelector("#translation-enabled").checked = settings.translationEnabled;
@@ -586,6 +625,10 @@ function closeSettings() {
   query.focus();
   runSearch();
 }
+
+document.querySelector("#open-settings").addEventListener("click", () => {
+  openSettings();
+});
 
 document.querySelector("#settings-back").addEventListener("click", closeSettings);
 
@@ -672,6 +715,35 @@ api.onIndexUpdated(() => {
   if (!launcher.hidden) runSearch();
 });
 
+/* ---------- theme ---------- */
+const themeChoices = document.querySelector("#theme-choices");
+if (themeChoices) {
+  themeChoices.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-theme-choice]");
+    if (!button || !themeChoices.contains(button)) return;
+    const theme = normalizeTheme(button.dataset.themeChoice);
+    // Apply immediately for instant preview, then persist.
+    applyTheme(theme);
+    try {
+      await api.updateSettings({ theme });
+    } catch (error) {
+      showToast(error.message || String(error));
+    }
+  });
+}
+
 /* ---------- startup ---------- */
 query.focus();
 runSearch();
+
+// Fetch the authoritative theme; keep the cached value on failure.
+if (api && typeof api.getSettings === "function") {
+  api
+    .getSettings()
+    .then((settings) => {
+      if (settings && settings.theme) applyTheme(settings.theme);
+    })
+    .catch(() => {
+      // Keep the cached theme; do not surface an error.
+    });
+}

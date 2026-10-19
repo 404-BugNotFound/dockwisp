@@ -8,6 +8,8 @@ export interface TranslationSettings {
   apiKey: string;
 }
 
+export type ThemePreference = "system" | "light" | "dark";
+
 export interface AppSettings {
   hotkey: string;
   launchAtLogin: boolean;
@@ -18,6 +20,7 @@ export interface AppSettings {
   pluginDirectories: string[];
   customLaunchItems: string[];
   pinnedMatches: PinnedMatch[];
+  theme: ThemePreference;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -34,7 +37,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   pluginDirectories: [],
   customLaunchItems: [],
   pinnedMatches: [],
+  theme: "system",
 };
+
+const THEME_VALUES = new Set<ThemePreference>(["system", "light", "dark"]);
 
 const PINNED_KINDS = new Set<PinnedMatch["kind"]>(["app", "plugin", "builtin", "file"]);
 const PINNED_LIMIT = 50;
@@ -108,6 +114,10 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
       ? value.customLaunchItems.filter((item): item is string => typeof item === "string")
       : [],
     pinnedMatches: normalizePinnedMatches(value.pinnedMatches),
+    theme:
+      typeof value.theme === "string" && THEME_VALUES.has(value.theme as ThemePreference)
+        ? (value.theme as ThemePreference)
+        : DEFAULT_SETTINGS.theme,
   };
 }
 
