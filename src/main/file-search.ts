@@ -46,6 +46,8 @@ export class FileSearch {
   private providerStartedAt = 0;
   private startedProvider: FileSearchProvider | null = null;
   private indexingObservedAt = 0;
+  private installedLookup: Promise<string | null> | null = null;
+  private installedPath: string | null = null;
 
   constructor(
     private readonly helperPath: string,
@@ -67,12 +69,20 @@ export class FileSearch {
    * non-blocking: any failure is swallowed and the normal lazy start still
    * applies on the first query.
    */
-  warmUp(): void {
+  async warmUp(): Promise<void> {
     try {
-      this.startProvider();
+      // An Everything instance that is already running (e.g. the user's own
+      // installation in the tray) is reused as-is; never start a second one.
+      if (await this.isEverythingRunning()) return;
+      await this.startProvider();
     } catch {
       // Ignore: the first query will retry via the normal path.
     }
+  }
+
+  private async isEverythingRunning(): Promise<boolean> {
+    const status = await this.runHelper("--status");
+    return status?.ipc === true;
   }
 
   static resolveExecutable(isPackaged: boolean, resourcesPath: string): string {
@@ -87,28 +97,39 @@ export class FileSearch {
       : path.join(process.cwd(), "native", "portable", "Everything.exe");
   }
 
-  /** Locate an installed Everything executable, if any. */
-  private installedEverything(): string | null {
+  /**
+   * Locate an installed Everything executable, if any. Checks the common install
+   * folders first, then the paths recorded in the registry uninstall entries so
+   * installs in custom locations (other drives, custom folders) are found too.
+   * The result is cached for the lifetime of the process.
+   */
+  private installedEverything(): Promise<string | null> {
     // Developer/test hook: exercise the bundled portable path even on a machine
     // with Everything installed.
     if (process.env.DOCKWISP_FORCE_PORTABLE === "1" || process.env.OPENDOCK_FORCE_PORTABLE === "1")
-      return null;
-    const candidates = [
-      process.env.ProgramFiles && path.join(process.env.ProgramFiles, "Everything", "Everything.exe"),
-      process.env["ProgramFiles(x86)"] &&
-        path.join(process.env["ProgramFiles(x86)"], "Everything", "Everything.exe"),
-      process.env.LOCALAPPDATA &&
-        path.join(process.env.LOCALAPPDATA, "Programs", "Everything", "Everything.exe"),
+      return Promise.resolve(null);
+    this.installedLookup ??= this.locateInstalledEverything().then((found) => {
+      this.installedPath = found;
+      return found;
+    });
+    return this.installedLookup;
+  }
+
+  private async locateInstalledEverything(): Promise<string | null> {
+    const directories = [
+      process.env.ProgramFiles && path.join(process.env.ProgramFiles, "Everything"),
+      process.env["ProgramFiles(x86)"] && path.join(process.env["ProgramFiles(x86)"], "Everything"),
+      process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Programs", "Everything"),
+      process.env.ProgramFiles && path.join(process.env.ProgramFiles, "Everything 1.5a"),
     ].filter((item): item is string => typeof item === "string");
-    for (const candidate of candidates) {
-      if (existsSync(candidate)) return candidate;
-    }
-    return null;
+    const direct = findEverythingExecutable(directories);
+    if (direct) return direct;
+    return findEverythingExecutable(await registryEverythingDirectories());
   }
 
   /** The provider we would use: installed system Everything, else portable. */
   private preferredProvider(): FileSearchProvider {
-    return this.installedEverything() ? "system" : "portable";
+    return this.installedPath ? "system" : "portable";
   }
 
   /** Run a file query and report results plus a status for the renderer. */
@@ -132,7 +153,7 @@ export class FileSearch {
     // IPC unavailable: Everything is not running. Try to start a provider.
     if (helper.ipc === false) {
       if (!this.providerStarted) {
-        if (this.startProvider()) {
+        if (await this.startProvider()) {
           return this.indexingResult("starting");
         }
         this.clearIndexingProgress();
@@ -204,14 +225,14 @@ export class FileSearch {
    * no provider could be started (e.g. portable exe missing), so the caller can
    * fall back to the bounded index.
    */
-  private startProvider(): boolean {
+  private async startProvider(): Promise<boolean> {
     const now = Date.now();
     if (this.providerStarted && now - this.providerStartedAt < RESTART_INTERVAL_MS) {
       // Already started recently; treat as in-progress so the caller polls.
       return true;
     }
 
-    const installed = this.installedEverything();
+    const installed = await this.installedEverything();
     const executable = installed ?? this.portablePath;
     const provider: FileSearchProvider = installed ? "system" : "portable";
 
@@ -239,11 +260,15 @@ export class FileSearch {
   }
 
   private queryHelper(query: string): Promise<HelperResult | null> {
+    return this.runHelper(query);
+  }
+
+  private runHelper(argument: string): Promise<HelperResult | null> {
     if (!existsSync(this.helperPath)) return Promise.resolve(null);
     return new Promise((resolve) => {
       execFile(
         this.helperPath,
-        [query],
+        [argument],
         { windowsHide: true, timeout: 5_000, maxBuffer: 8 * 1024 * 1024 },
         (error, stdout) => {
           // The helper exits non-zero for indexing/IPC states but still prints
@@ -326,3 +351,80 @@ const SKIP_DIRECTORIES = new Set([
 ]);
 
 const SKIP_EXTENSIONS = new Set([".pf", ".pyc"]);
+
+const EVERYTHING_EXECUTABLES = ["Everything.exe", "Everything64.exe"];
+
+/** Return the first Everything executable found in the given directories. */
+export function findEverythingExecutable(directories: string[]): string | null {
+  for (const directory of directories) {
+    for (const name of EVERYTHING_EXECUTABLES) {
+      const candidate = path.join(directory, name);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+const UNINSTALL_KEYS = [
+  "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+  "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+  "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+];
+
+/** Install directories of Everything recorded in the registry uninstall entries. */
+async function registryEverythingDirectories(): Promise<string[]> {
+  if (process.platform !== "win32") return [];
+  const outputs = await Promise.all(
+    UNINSTALL_KEYS.map(
+      (key) =>
+        new Promise<string>((resolve) => {
+          execFile(
+            "reg.exe",
+            ["query", key, "/s"],
+            { windowsHide: true, timeout: 5_000, maxBuffer: 32 * 1024 * 1024 },
+            (_error, stdout) => resolve(stdout ?? ""),
+          );
+        }),
+    ),
+  );
+  const directories: string[] = [];
+  for (const output of outputs) directories.push(...parseEverythingUninstallEntries(output));
+  return [...new Set(directories)];
+}
+
+/**
+ * Extract Everything install directories from `reg query /s` output. Only
+ * entries whose DisplayName starts with "Everything" are considered, and both
+ * InstallLocation and the DisplayIcon/UninstallString directories are used.
+ */
+export function parseEverythingUninstallEntries(output: string): string[] {
+  const directories: string[] = [];
+  for (const block of output.split(/\r?\n\s*\r?\n/)) {
+    const values = new Map<string, string>();
+    for (const line of block.split(/\r?\n/)) {
+      const match = /^\s+(\S+)\s+REG_(?:EXPAND_)?SZ\s+(.*)$/.exec(line);
+      if (match) values.set(match[1].toLowerCase(), match[2].trim());
+    }
+    const name = values.get("displayname");
+    if (!name || !/^everything\b/i.test(name)) continue;
+    const location = values.get("installlocation");
+    if (location) directories.push(stripQuotes(location));
+    for (const key of ["displayicon", "uninstallstring"]) {
+      const value = values.get(key);
+      const executable = value && extractExecutablePath(value);
+      if (executable) directories.push(path.win32.dirname(executable));
+    }
+  }
+  return directories.filter((item) => item.length > 0);
+}
+
+function stripQuotes(value: string): string {
+  return value.replace(/^"+|"+$/g, "").replace(/[\\/]+$/, "");
+}
+
+function extractExecutablePath(value: string): string | null {
+  const quoted = /^"([^"]+\.exe)"/i.exec(value.trim());
+  if (quoted) return quoted[1];
+  const bare = /^(.+?\.exe)\b/i.exec(value.trim());
+  return bare ? bare[1] : null;
+}

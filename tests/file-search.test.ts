@@ -1,11 +1,54 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FileSearch } from "../src/main/file-search";
+import { FileSearch, parseEverythingUninstallEntries } from "../src/main/file-search";
 
 interface MutableFileSearch {
   queryHelper: (query: string) => Promise<unknown>;
+  runHelper: (argument: string) => Promise<unknown>;
+  startProvider: () => Promise<boolean>;
   indexingObservedAt: number;
 }
+
+test("warmUp reuses a running Everything instead of starting a provider", async () => {
+  const search = new FileSearch("missing-helper", "missing-portable", "config", "db", () => []);
+  const mutable = search as unknown as MutableFileSearch;
+  let started = 0;
+  mutable.startProvider = async () => {
+    started += 1;
+    return true;
+  };
+
+  mutable.runHelper = async () => ({ ok: true, ipc: true, dbLoaded: true });
+  await search.warmUp();
+  assert.equal(started, 0);
+
+  mutable.runHelper = async () => ({ ok: true, ipc: false, dbLoaded: false });
+  await search.warmUp();
+  assert.equal(started, 1);
+});
+
+test("parses Everything install directories from registry uninstall output", () => {
+  const output = [
+    "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Everything",
+    "    DisplayName    REG_SZ    Everything 1.4.1.1026 (x64)",
+    "    DisplayIcon    REG_SZ    D:\\Tools\\Everything\\Everything.exe",
+    "    UninstallString    REG_SZ    \"D:\\Tools\\Everything\\Uninstall.exe\"",
+    "",
+    "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Everything 1.5a",
+    "    DisplayName    REG_SZ    Everything 1.5.0.1383a (x64)",
+    "    InstallLocation    REG_SZ    E:\\Apps\\Everything 1.5a\\",
+    "",
+    "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Other",
+    "    DisplayName    REG_SZ    Search Everything Toolbar",
+    "    DisplayIcon    REG_SZ    C:\\Other\\other.exe,0",
+    "",
+  ].join("\r\n");
+  assert.deepEqual(parseEverythingUninstallEntries(output), [
+    "D:\\Tools\\Everything",
+    "D:\\Tools\\Everything",
+    "E:\\Apps\\Everything 1.5a",
+  ]);
+});
 
 test("reports indexing phase and clears it when results become ready", async () => {
   const search = new FileSearch("missing-helper", "missing-portable", "config", "db", () => []);

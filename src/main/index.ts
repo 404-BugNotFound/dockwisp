@@ -1294,7 +1294,7 @@ void app.whenReady().then(async () => {
   // search does not pay the spawn/index latency. Skip in test/capture modes to
   // avoid launching Everything in automated environments.
   if (!smokeTest && !captureUiPath && !captureSettingsPath) {
-    setTimeout(() => fileSearch.warmUp(), 1_200);
+    setTimeout(() => void fileSearch.warmUp(), 1_200);
   }
 
   const rememberMatches = (matches: SearchMatch[]): void => {
