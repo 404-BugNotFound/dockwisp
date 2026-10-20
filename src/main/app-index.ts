@@ -5,8 +5,7 @@ import path from "node:path";
 import { shell } from "electron";
 import { buildSearchForms } from "../core/matcher";
 import { AppEntry } from "../core/types";
-
-export const LAUNCHABLE_EXTENSIONS = new Set([".lnk", ".exe", ".url", ".appref-ms"]);
+import { LAUNCHABLE_EXTENSIONS } from "./custom-items";
 
 function entryId(filePath: string): string {
   return createHash("sha1").update(filePath.toLowerCase()).digest("hex");

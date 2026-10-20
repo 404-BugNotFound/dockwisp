@@ -42,7 +42,14 @@ import {
   SearchInput,
   SearchMatch,
 } from "../core/types";
-import { buildApplicationIndex, LAUNCHABLE_EXTENSIONS } from "./app-index";
+import { buildApplicationIndex } from "./app-index";
+import {
+  customItemKey,
+  describeCustomItems,
+  mergeCustomItems,
+  type MergeCustomItemOptions,
+  removeCustomItem,
+} from "./custom-items";
 import { CurrencyRates } from "./currency";
 import { FileSearch } from "./file-search";
 import { MouseHelper } from "./mouse-helper";
@@ -1119,12 +1126,20 @@ void app.whenReady().then(async () => {
     launcher?.webContents.send("launcher:index-updated");
   });
 
-  launcher = createLauncherWindow();
+  let launcherHubOpen = false;
+  launcher = createLauncherWindow(() => launcherHubOpen);
   launcher.on("close", (event) => {
     if (!quitting) {
       event.preventDefault();
       launcher?.hide();
     }
+  });
+  launcher.on("hide", () => {
+    launcherHubOpen = false;
+  });
+  ipcMain.on("launcher:hub-open", (event, open: unknown) => {
+    if (!launcher || launcher.isDestroyed() || event.sender !== launcher.webContents) return;
+    launcherHubOpen = open === true;
   });
 
   // Persist the launcher position when the user drags it. Debounced so a drag
@@ -1142,6 +1157,8 @@ void app.whenReady().then(async () => {
   let launcherDragState: {
     originX: number;
     originY: number;
+    width: number;
+    height: number;
     startX: number;
     startY: number;
   } | null = null;
@@ -1170,22 +1187,32 @@ void app.whenReady().then(async () => {
     if (!settingsStore.get().windowDragEnabled) return;
     if (typeof x !== "number" || typeof y !== "number") return;
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-    const [originX, originY] = launcher.getPosition();
+    const { x: originX, y: originY, width, height } = launcher.getBounds();
     // Use the real cursor position (DIP) rather than relying on the renderer's
     // CSS-pixel coordinates; this stays correct across mixed-DPI monitors.
     const cursor = screen.getCursorScreenPoint();
-    launcherDragState = { originX, originY, startX: cursor.x, startY: cursor.y };
+    launcherDragState = {
+      originX,
+      originY,
+      width,
+      height,
+      startX: cursor.x,
+      startY: cursor.y,
+    };
     suppressLauncherPositionSaveUntil = 0;
   });
   ipcMain.on("launcher:drag-move", (event) => {
     if (!launcher || launcher.isDestroyed() || !launcherDragState) return;
     if (event.sender !== launcher.webContents) return;
     const cursor = screen.getCursorScreenPoint();
-    launcher.setPosition(
-      Math.round(launcherDragState.originX + (cursor.x - launcherDragState.startX)),
-      Math.round(launcherDragState.originY + (cursor.y - launcherDragState.startY)),
-      false,
-    );
+    // On scaled Windows displays setPosition can gradually change a frameless
+    // window's size, so keep the drag-start dimensions explicit on every move.
+    launcher.setBounds({
+      x: Math.round(launcherDragState.originX + (cursor.x - launcherDragState.startX)),
+      y: Math.round(launcherDragState.originY + (cursor.y - launcherDragState.startY)),
+      width: launcherDragState.width,
+      height: launcherDragState.height,
+    });
   });
   ipcMain.on("launcher:drag-end", (event) => {
     if (!launcherDragState) return;
@@ -1293,6 +1320,23 @@ void app.whenReady().then(async () => {
     refreshApplications();
     fileSearch.invalidate();
   };
+
+  const addCustomItems = (
+    rawPaths: string[],
+    options: MergeCustomItemOptions,
+  ): ReturnType<typeof mergeCustomItems> => {
+    const current = settingsStore.get();
+    const result = mergeCustomItems(current.customLaunchItems, rawPaths, options);
+    if (result.added.length > 0) {
+      settingsStore.update({ customLaunchItems: result.paths });
+      refreshApplications();
+      fileSearch.invalidate();
+    }
+    return result;
+  };
+
+  const currentCustomItems = () =>
+    describeCustomItems(settingsStore.get().customLaunchItems);
 
   /** Build the pinned home page from stored snapshots, with refreshed icons. */
   const homeMatches = async (): Promise<SearchMatch[]> => {
@@ -1510,12 +1554,19 @@ void app.whenReady().then(async () => {
         }
         const result = await fileSearch.query(query);
         if (result.status === "indexing") {
+          const provider = result.provider === "system" ? "系统 Everything" : "便携版 Everything";
+          const elapsedSeconds = Math.floor((result.progress?.elapsedMs ?? 0) / 1_000);
+          const elapsed =
+            elapsedSeconds < 60
+              ? `${elapsedSeconds} 秒`
+              : `${Math.floor(elapsedSeconds / 60)} 分 ${elapsedSeconds % 60} 秒`;
+          const starting = result.progress?.phase === "starting";
           const match: BuiltinMatch = {
             id: "status:file-indexing",
             kind: "builtin",
             action: "file-indexing",
-            title: "正在建立文件索引…",
-            subtitle: "首次运行需要几分钟，完成后会自动显示结果",
+            title: starting ? "正在启动文件索引…" : "正在建立文件索引…",
+            subtitle: `${provider} · 已用时 ${elapsed} · 完成后自动刷新`,
             score: 9999,
             payload: query,
           };
@@ -1834,47 +1885,8 @@ void app.whenReady().then(async () => {
     const inputs = Array.isArray(rawPaths)
       ? rawPaths.filter((item): item is string => typeof item === "string")
       : [];
-    const current = settingsStore.get();
-    const existingLower = new Set(
-      current.customLaunchItems.map((item) => item.toLowerCase()),
-    );
-    const added: Array<{ name: string; path: string }> = [];
-    const skipped: string[] = [];
-    const accepted: string[] = [];
-    for (const raw of inputs) {
-      const filePath = raw.trim();
-      if (!filePath) continue;
-      const extension = path.extname(filePath).toLowerCase();
-      let isFile = false;
-      try {
-        isFile = statSync(filePath).isFile();
-      } catch {
-        isFile = false;
-      }
-      if (!isFile || !LAUNCHABLE_EXTENSIONS.has(extension)) {
-        skipped.push(filePath);
-        continue;
-      }
-      const lower = filePath.toLowerCase();
-      if (existingLower.has(lower)) {
-        skipped.push(filePath);
-        continue;
-      }
-      existingLower.add(lower);
-      accepted.push(filePath);
-      added.push({ name: path.basename(filePath, extension), path: filePath });
-    }
-    if (accepted.length) {
-      settingsStore.update({
-        customLaunchItems: [...current.customLaunchItems, ...accepted],
-      });
-      applications = buildApplicationIndex(
-        settingsStore.get().customLaunchItems,
-        pinnedAppPaths(settingsStore.get().pinnedMatches),
-      );
-      launcher?.webContents.send("launcher:index-updated");
-    }
-    return { added, skipped };
+    const result = addCustomItems(inputs, { applications: true, directories: false });
+    return { added: result.added, skipped: result.skipped };
   });
 
   ipcMain.handle("launcher:pin-match", async (_event, id: unknown, pinned: unknown) => {
@@ -1891,15 +1903,6 @@ void app.whenReady().then(async () => {
       nextPinned = nextPinned.filter((item) => item.id !== snapshot.id);
       nextPinned.unshift(snapshot);
       if (nextPinned.length > 50) nextPinned = nextPinned.slice(0, 50);
-      // Ensure launchable targets are present in the custom item list.
-      if ((target.kind === "app" || target.kind === "file") && target.path) {
-        const lower = target.path.toLowerCase();
-        if (!current.customLaunchItems.some((item) => item.toLowerCase() === lower)) {
-          settingsStore.update({
-            customLaunchItems: [...current.customLaunchItems, target.path],
-          });
-        }
-      }
     } else {
       nextPinned = nextPinned.filter((item) => item.id !== matchId);
     }
@@ -1972,20 +1975,44 @@ void app.whenReady().then(async () => {
   });
   ipcMain.handle("launcher:add-custom-item", async () => {
     const result = await dialog.showOpenDialog(launcher!, {
-      title: "添加应用、文件或目录",
-      properties: ["openFile", "openDirectory", "multiSelections"],
+      title: "添加本地应用",
+      properties: ["openFile", "multiSelections"],
+      filters: [
+        { name: "应用程序", extensions: ["exe", "lnk", "url", "appref-ms"] },
+      ],
     });
-    if (result.canceled) return false;
+    if (result.canceled) return { added: [], skipped: [] };
+    const merged = addCustomItems(result.filePaths, {
+      applications: true,
+      directories: false,
+    });
+    return { added: merged.added, skipped: merged.skipped };
+  });
+  ipcMain.handle("launcher:add-custom-directory", async () => {
+    const result = await dialog.showOpenDialog(launcher!, {
+      title: "添加索引目录",
+      properties: ["openDirectory", "multiSelections"],
+    });
+    if (result.canceled) return { added: [], skipped: [] };
+    const merged = addCustomItems(result.filePaths, {
+      applications: false,
+      directories: true,
+    });
+    return { added: merged.added, skipped: merged.skipped };
+  });
+  ipcMain.handle("launcher:list-custom-items", () => currentCustomItems());
+  ipcMain.handle("launcher:remove-custom-item", (_event, rawPath: unknown) => {
+    if (typeof rawPath !== "string" || !rawPath.trim()) return currentCustomItems();
+    const targetKey = customItemKey(rawPath);
     const current = settingsStore.get();
-    settingsStore.update({
-      customLaunchItems: [...new Set([...current.customLaunchItems, ...result.filePaths])],
-    });
-    applications = buildApplicationIndex(
-      settingsStore.get().customLaunchItems,
-      pinnedAppPaths(settingsStore.get().pinnedMatches),
+    const customLaunchItems = removeCustomItem(current.customLaunchItems, rawPath);
+    const pinnedMatches = current.pinnedMatches.filter(
+      (item) => !item.path || customItemKey(item.path) !== targetKey,
     );
-    launcher?.webContents.send("launcher:index-updated");
-    return true;
+    settingsStore.update({ customLaunchItems, pinnedMatches });
+    refreshApplications();
+    fileSearch.invalidate();
+    return currentCustomItems();
   });
   ipcMain.handle("launcher:refresh", () => {
     refreshApplications();

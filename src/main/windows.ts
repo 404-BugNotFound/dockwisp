@@ -11,7 +11,7 @@ export interface LauncherPosition {
   y: number;
 }
 
-export function createLauncherWindow(): BrowserWindow {
+export function createLauncherWindow(keepOpenOnBlur: () => boolean = () => false): BrowserWindow {
   const window = new BrowserWindow({
     width: LAUNCHER_WIDTH,
     height: LAUNCHER_HEIGHT,
@@ -35,7 +35,12 @@ export function createLauncherWindow(): BrowserWindow {
   window.on("blur", () => {
     if (blurTimer) clearTimeout(blurTimer);
     blurTimer = setTimeout(() => {
-      if (!window.isDestroyed() && !window.isFocused() && !window.webContents.isDevToolsOpened()) {
+      if (
+        !window.isDestroyed() &&
+        !window.isFocused() &&
+        !window.webContents.isDevToolsOpened() &&
+        !keepOpenOnBlur()
+      ) {
         window.hide();
       }
     }, 140);

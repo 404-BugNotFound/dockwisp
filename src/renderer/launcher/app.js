@@ -76,6 +76,10 @@ const results = document.querySelector("#results");
 const home = document.querySelector("#home");
 const toast = document.querySelector("#toast");
 const contextMenu = document.querySelector("#context-menu");
+const contentDropZone = document.querySelector("#content-drop-zone");
+const customItemsList = document.querySelector("#custom-items-list");
+const customItemsEmpty = document.querySelector("#custom-items-empty");
+const customItemCount = document.querySelector("#custom-item-count");
 
 const FILE_PREFIXES = ["文件 ", "file "];
 const FILE_MODE_RE = /^(?:文件|file)\s+/i;
@@ -480,7 +484,7 @@ async function runSearch(input, quiet = false) {
             return;
           }
           runSearch({ type: "text", data: query.value }, true);
-        }, 1500);
+        }, 1000);
         return;
       }
       if (list.length === 0) {
@@ -711,15 +715,25 @@ query.addEventListener("keydown", (event) => {
 
 /* ---------- drag & drop ---------- */
 document.addEventListener("dragover", (event) => {
+  if (!settingsPanel.hidden) {
+    event.preventDefault();
+    if (!contentDropZone?.contains(event.target)) event.dataTransfer.dropEffect = "none";
+    return;
+  }
   event.preventDefault();
   searchBar.classList.add("drag-active");
 });
 document.addEventListener("dragleave", (event) => {
+  if (!settingsPanel.hidden) return;
   if (event.relatedTarget === null) {
     searchBar.classList.remove("drag-active");
   }
 });
 document.addEventListener("drop", async (event) => {
+  if (!settingsPanel.hidden) {
+    event.preventDefault();
+    return;
+  }
   event.preventDefault();
   searchBar.classList.remove("drag-active");
   const files = [...event.dataTransfer.files];
@@ -744,10 +758,44 @@ document.addEventListener("drop", async (event) => {
   }
 });
 
+if (contentDropZone) {
+  contentDropZone.addEventListener("dragenter", (event) => {
+    event.preventDefault();
+    contentDropZone.classList.add("is-dragging");
+  });
+  contentDropZone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    contentDropZone.classList.add("is-dragging");
+  });
+  contentDropZone.addEventListener("dragleave", (event) => {
+    if (!contentDropZone.contains(event.relatedTarget)) {
+      contentDropZone.classList.remove("is-dragging");
+    }
+  });
+  contentDropZone.addEventListener("drop", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    contentDropZone.classList.remove("is-dragging");
+    const files = [...event.dataTransfer.files];
+    const paths = api.pathsForFiles(files);
+    if (!paths.length) return;
+    try {
+      const result = await api.addPaths(paths);
+      await loadCustomItems();
+      reportCustomItemResult(result, "应用");
+    } catch (error) {
+      document.querySelector("#settings-status").textContent =
+        error.message || String(error);
+    }
+  });
+}
+
 /* ---------- settings ---------- */
 const HUB_PAGES = new Set(["settings", "plugins"]);
 let hubPage = "settings";
 let pluginList = [];
+let customItems = [];
 
 function showHubPage(page = "settings") {
   const next = HUB_PAGES.has(page) ? page : "settings";
@@ -873,9 +921,89 @@ async function loadPlugins() {
   }
 }
 
+function customItemTypeLabel(item) {
+  if (item.kind === "directory") return "索引目录";
+  if (item.kind === "application") return "应用";
+  return "文件";
+}
+
+function renderCustomItems() {
+  if (!customItemsList || !customItemsEmpty || !customItemCount) return;
+  customItemsList.replaceChildren();
+  customItemCount.textContent = `${customItems.length} 项`;
+  customItemsEmpty.hidden = customItems.length > 0;
+  for (const item of customItems) {
+    const row = document.createElement("div");
+    row.className = `custom-item${item.exists === false ? " is-missing" : ""}`;
+    row.setAttribute("role", "listitem");
+
+    const info = document.createElement("div");
+    info.className = "custom-item-info";
+    const title = document.createElement("div");
+    title.className = "custom-item-title";
+    const name = document.createElement("strong");
+    name.textContent = item.name || item.path;
+    const badge = document.createElement("span");
+    badge.className = "custom-item-badge";
+    badge.textContent = `${customItemTypeLabel(item)}${item.exists === false ? " · 文件缺失" : ""}`;
+    title.append(name, badge);
+    const filePath = document.createElement("div");
+    filePath.className = "custom-item-path";
+    filePath.textContent = item.path;
+    filePath.title = item.path;
+    info.append(title, filePath);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "custom-item-remove";
+    remove.textContent = "移除";
+    remove.setAttribute("aria-label", `移除 ${item.name || item.path}`);
+    remove.addEventListener("click", async () => {
+      remove.disabled = true;
+      try {
+        customItems = (await api.removeCustomItem(item.path)) || [];
+        renderCustomItems();
+        document.querySelector("#settings-status").textContent =
+          `已移除：${item.name || item.path}`;
+      } catch (error) {
+        remove.disabled = false;
+        document.querySelector("#settings-status").textContent =
+          error.message || String(error);
+      }
+    });
+    row.append(info, remove);
+    customItemsList.append(row);
+  }
+}
+
+async function loadCustomItems() {
+  if (!api || typeof api.listCustomItems !== "function") return;
+  try {
+    customItems = (await api.listCustomItems()) || [];
+    renderCustomItems();
+  } catch (error) {
+    document.querySelector("#settings-status").textContent =
+      error.message || String(error);
+  }
+}
+
+function reportCustomItemResult(result, itemLabel) {
+  const added = (result && result.added) || [];
+  const skipped = (result && result.skipped) || [];
+  if (added.length > 0) {
+    const names = added.map((item) => item.name).join("、");
+    document.querySelector("#settings-status").textContent =
+      `已添加${itemLabel}：${names}${skipped.length ? ` · 跳过 ${skipped.length} 项` : ""}`;
+  } else if (skipped.length > 0) {
+    document.querySelector("#settings-status").textContent =
+      `未添加：所选项目已存在或不是受支持的${itemLabel}`;
+  }
+}
+
 async function openSettings(page = "settings") {
   closeContextMenu();
   clearFilePoll();
+  if (api && typeof api.setHubOpen === "function") api.setHubOpen(true);
   launcher.hidden = true;
   settingsPanel.hidden = false;
   lastResizeHeight = 0;
@@ -918,10 +1046,12 @@ async function openSettings(page = "settings") {
   document.querySelector("#settings-status").textContent = diagnostics.join("\n") || "所有配置均可用";
   const version = document.querySelector("#hub-version");
   if (version) version.textContent = settings.appVersion ? `v${settings.appVersion}` : "";
+  await loadCustomItems();
   showHubPage(page);
 }
 
 function closeSettings() {
+  if (api && typeof api.setHubOpen === "function") api.setHubOpen(false);
   settingsPanel.hidden = true;
   launcher.hidden = false;
   lastResizeHeight = 0;
@@ -1004,9 +1134,27 @@ document.querySelector("#plugin-search").addEventListener("input", renderPluginG
 for (const button of document.querySelectorAll(".nav-item[data-page]")) {
   button.addEventListener("click", () => showHubPage(button.dataset.page));
 }
-document.querySelector("#add-item").addEventListener("click", () => api.addCustomItem());
+document.querySelector("#add-item").addEventListener("click", async () => {
+  try {
+    const result = await api.addCustomItem();
+    await loadCustomItems();
+    reportCustomItemResult(result, "应用");
+  } catch (error) {
+    document.querySelector("#settings-status").textContent = error.message || String(error);
+  }
+});
+document.querySelector("#add-directory").addEventListener("click", async () => {
+  try {
+    const result = await api.addCustomDirectory();
+    await loadCustomItems();
+    reportCustomItemResult(result, "目录");
+  } catch (error) {
+    document.querySelector("#settings-status").textContent = error.message || String(error);
+  }
+});
 document.querySelector("#refresh-index").addEventListener("click", async () => {
   const report = await api.refresh();
+  await loadCustomItems();
   document.querySelector("#settings-status").textContent = `索引已刷新：${report.applications} 个应用，${report.plugins} 个插件`;
 });
 document.querySelector("#clear-usage").addEventListener("click", async () => {
@@ -1031,7 +1179,10 @@ document.querySelector("#reset-position").addEventListener("click", async () => 
 
 /* ---------- events ---------- */
 api.onFocus((point) => {
-  if (!settingsPanel.hidden) return;
+  if (!settingsPanel.hidden) {
+    if (api && typeof api.setHubOpen === "function") api.setHubOpen(true);
+    return;
+  }
   closeContextMenu();
   // The main process passes the current cursor point in screen coordinates.
   // Seeding the baseline here means the first real mouse movement can select a
@@ -1048,6 +1199,16 @@ api.onFocus((point) => {
   if (!hasSearched) {
     lastResizeHeight = 0;
     runSearch();
+    return;
+  }
+  // Blur hides the compact launcher and pauses indexing polls. If it is opened
+  // again while the status row is still visible, resume the pending query so a
+  // completed Everything index replaces the status automatically.
+  if (
+    matches.some((match) => match.action === "file-indexing") &&
+    isFileModeInput({ type: "text", data: query.value })
+  ) {
+    runSearch({ type: "text", data: query.value }, true);
     return;
   }
   // Do not re-run the search on every focus; the existing view stays.

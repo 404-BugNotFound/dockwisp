@@ -4,12 +4,19 @@ import path from "node:path";
 
 export type FileSearchStatus = "ok" | "indexing" | "error" | "fallback";
 export type FileSearchProvider = "system" | "portable" | "fallback";
+export type FileSearchPhase = "starting" | "indexing";
+
+export interface FileSearchProgress {
+  phase: FileSearchPhase;
+  elapsedMs: number;
+}
 
 export interface FileSearchResult {
   paths: string[];
   status: FileSearchStatus;
   message?: string;
   provider?: FileSearchProvider;
+  progress?: FileSearchProgress;
 }
 
 interface HelperResult {
@@ -38,6 +45,7 @@ export class FileSearch {
   private providerStarted = false;
   private providerStartedAt = 0;
   private startedProvider: FileSearchProvider | null = null;
+  private indexingObservedAt = 0;
 
   constructor(
     private readonly helperPath: string,
@@ -113,6 +121,7 @@ export class FileSearch {
     // Helper missing or produced unparseable output: do not spin on "indexing"
     // forever. Fall back to the bounded common-folder index.
     if (helper === null) {
+      this.clearIndexingProgress();
       return {
         paths: this.queryFallback(query),
         status: "fallback",
@@ -124,8 +133,9 @@ export class FileSearch {
     if (helper.ipc === false) {
       if (!this.providerStarted) {
         if (this.startProvider()) {
-          return { paths: [], status: "indexing", provider: this.startedProvider ?? undefined };
+          return this.indexingResult("starting");
         }
+        this.clearIndexingProgress();
         return {
           paths: this.queryFallback(query),
           status: "fallback",
@@ -135,6 +145,7 @@ export class FileSearch {
       // If the provider never opened its IPC window (UAC dismissed, exe failed),
       // stop pretending it is still indexing and surface the fallback.
       if (Date.now() - this.providerStartedAt > 60_000) {
+        this.clearIndexingProgress();
         return {
           paths: this.queryFallback(query),
           status: "fallback",
@@ -142,16 +153,17 @@ export class FileSearch {
         };
       }
       // Already started once and still no IPC window: keep polling.
-      return { paths: [], status: "indexing", provider: this.startedProvider ?? undefined };
+      return this.indexingResult("starting");
     }
 
     // Database still loading (first index can take minutes).
     if (helper.indexing === true) {
-      return { paths: [], status: "indexing", provider: this.startedProvider ?? undefined };
+      return this.indexingResult("indexing");
     }
 
     // Success.
     if (helper.ok && Array.isArray(helper.results)) {
+      this.clearIndexingProgress();
       const paths = helper.results
         .map((item) => item.path)
         .filter((item): item is string => typeof item === "string");
@@ -161,11 +173,30 @@ export class FileSearch {
     // Query failed after the DB was loaded (not IPC, not indexing): report an
     // error rather than polling forever.
     const code = typeof helper.code === "number" ? helper.code : helper.error;
+    this.clearIndexingProgress();
     return {
       paths: [],
       status: "error",
       message: `文件搜索查询失败（代码 ${String(code ?? "unknown")}）`,
     };
+  }
+
+  private indexingResult(phase: FileSearchPhase): FileSearchResult {
+    const now = Date.now();
+    if (!this.indexingObservedAt) this.indexingObservedAt = now;
+    return {
+      paths: [],
+      status: "indexing",
+      provider: this.startedProvider ?? this.preferredProvider(),
+      progress: {
+        phase,
+        elapsedMs: Math.max(0, now - this.indexingObservedAt),
+      },
+    };
+  }
+
+  private clearIndexingProgress(): void {
+    this.indexingObservedAt = 0;
   }
 
   /**

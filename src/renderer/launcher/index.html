@@ -166,10 +166,21 @@
             <div><h2>内容与索引</h2><p>本地项目、索引与使用统计</p></div>
           </div>
           <div class="action-grid">
-            <button id="add-item" type="button"><span>＋</span><strong>添加本地项目</strong><small>应用、文件或目录</small></button>
+            <button id="add-item" type="button"><span>＋</span><strong>添加本地应用</strong><small>EXE、快捷方式</small></button>
+            <button id="add-directory" type="button"><span>⌑</span><strong>添加索引目录</strong><small>扩展有限文件索引</small></button>
             <button id="refresh-index" type="button"><span>↻</span><strong>刷新索引</strong><small>重新扫描全部来源</small></button>
             <button id="clear-usage" type="button"><span>⌫</span><strong>清空使用统计</strong><small>重置频率排序</small></button>
           </div>
+          <div id="content-drop-zone" class="content-drop-zone">
+            <span class="drop-mark">⇩</span>
+            <div><strong>拖放应用到这里</strong><small>支持一个或多个 EXE、快捷方式</small></div>
+          </div>
+          <div class="custom-items-heading">
+            <strong>已添加项目</strong>
+            <span id="custom-item-count">0 项</span>
+          </div>
+          <div id="custom-items-list" class="custom-items-list" role="list"></div>
+          <div id="custom-items-empty" class="custom-items-empty">尚未添加本地应用或索引目录</div>
         </article>
             </div>
           </section>
