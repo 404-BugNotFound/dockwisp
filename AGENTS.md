@@ -8,7 +8,8 @@
 - 临时验证、中间产物统一放到 `temp/`，不要散落在项目根目录。
 - `dist/`、`dist-test/` 是固定的编译/测试输出目录，不要另建。
 - 使用 `npm run dist` 覆盖 `release/`；交付路径固定为 `release/Dockwisp-<version>-x64.exe`。
-- 如果 `release/` 被占用而无法清理，报告并等待，或改用 `temp/` 做临时验证；不要用新的 `release-*` 目录绕过。
+- `npm run dist` 先在 `temp/electron-builder/<时间戳>/` 中打包，再只把安装包复制到 `release/`；`release/` 中不再存放 `win-unpacked`。
+- 清理时遇到被其他程序占用的文件会跳过并给出警告，不会中断打包；不要用新的 `release-*` 目录绕过。
 - 构建完成后确认 `release/` 中只有一个安装包，并在回复中给出该路径。
 
 ## Git 与二进制

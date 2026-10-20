@@ -19,7 +19,7 @@
     "verify": "npm run test && npm run build && npm run test:native && node scripts/run-electron.mjs --smoke-test --user-data-dir=temp/smoke-userdata",
     "start": "npm run build && node scripts/run-electron.mjs",
     "dev": "npm run build && node scripts/run-electron.mjs --dev",
-    "dist": "npm run verify && electron-builder --win nsis"
+    "dist": "npm run verify && node scripts/dist.mjs"
   },
   "dependencies": {
     "@electron/asar": "4.3.1",
