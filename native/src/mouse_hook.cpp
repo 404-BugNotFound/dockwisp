@@ -3,7 +3,9 @@
 #include <dwmapi.h>
 
 #include <atomic>
+#include <cwctype>
 #include <iostream>
+#include <iterator>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -19,6 +21,40 @@ HHOOK keyboard_hook = nullptr;
 std::atomic<bool> launcher_hotkey_enabled{false};
 std::atomic<bool> launcher_hotkey_down{false};
 std::atomic<bool> launcher_space_suppressed{false};
+
+// Remote-desktop clients: when one of these owns the foreground window the user
+// is typing into the remote machine, so Alt+Space must reach the client (and the
+// remote launcher) instead of summoning the local one.
+constexpr const wchar_t* kRemoteDesktopProcesses[] = {
+    L"mstsc.exe",          L"msrdc.exe",        L"vmconnect.exe",
+    L"gameviewer.exe",     L"uuremote.exe",     L"todesk.exe",
+    L"todesk_session.exe", L"sunloginclient.exe", L"sunloginremote.exe",
+    L"anydesk.exe",        L"teamviewer.exe",   L"rustdesk.exe",
+    L"parsecd.exe",        L"vncviewer.exe",    L"tvnviewer.exe",
+};
+
+bool foreground_is_remote_desktop() {
+  const HWND window = GetForegroundWindow();
+  if (!window) return false;
+  DWORD process_id = 0;
+  GetWindowThreadProcessId(window, &process_id);
+  if (!process_id) return false;
+  const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+  if (!process) return false;
+  wchar_t path_buffer[MAX_PATH * 4]{};
+  DWORD path_length = static_cast<DWORD>(std::size(path_buffer));
+  const bool ok = QueryFullProcessImageNameW(process, 0, path_buffer, &path_length) != FALSE;
+  CloseHandle(process);
+  if (!ok) return false;
+  std::wstring name(path_buffer, path_length);
+  const size_t slash = name.find_last_of(L"\\/");
+  if (slash != std::wstring::npos) name = name.substr(slash + 1);
+  for (auto& character : name) character = static_cast<wchar_t>(towlower(character));
+  for (const auto* candidate : kRemoteDesktopProcesses) {
+    if (name == candidate) return true;
+  }
+  return false;
+}
 
 void emit(const std::string& json) {
   std::lock_guard<std::mutex> lock(output_mutex);
@@ -282,6 +318,10 @@ LRESULT CALLBACK keyboard_proc(int code, WPARAM event, LPARAM data) {
     const bool alt_down = (info->flags & LLKHF_ALTDOWN) != 0 ||
                           (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
     if (is_space && is_down && alt_down) {
+      // Let a focused remote-desktop client forward the chord to the remote PC.
+      if (!launcher_space_suppressed && foreground_is_remote_desktop()) {
+        return CallNextHookEx(keyboard_hook, code, event, data);
+      }
       launcher_hotkey_down = true;
       launcher_space_suppressed = true;
       return 1;
