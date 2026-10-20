@@ -55,14 +55,26 @@ export class TranslationController {
     private readonly settings: SettingsStore,
   ) {
     helper.on("mouse", (event: MiddleMouseEvent) => this.onMouse(event));
-    ipcMain.on("translation:close", () => this.hide());
+    ipcMain.on("translation:close", () => {
+      this.pinned = false;
+      this.hide();
+    });
     ipcMain.on("translation:copy", () => {
       if (this.lastResult) clipboard.writeText(this.lastResult.translatedText);
     });
     ipcMain.on("translation:pin", (_event, pinned: boolean) => {
       this.pinned = pinned === true;
+      if (this.pinned) {
+        if (this.autoHideTimer) clearTimeout(this.autoHideTimer);
+        this.autoHideTimer = null;
+      } else if (this.window && !this.window.isDestroyed() && this.window.isVisible()) {
+        if (this.autoHideTimer) clearTimeout(this.autoHideTimer);
+        this.autoHideTimer = setTimeout(() => this.hide(), 14_000);
+      }
+      if (this.window && !this.window.isDestroyed()) {
+        this.window.setAlwaysOnTop(true, this.pinned ? "pop-up-menu" : "floating");
+      }
       this.sendState(this.currentState());
-      if (this.pinned && this.autoHideTimer) clearTimeout(this.autoHideTimer);
     });
   }
 
@@ -254,6 +266,9 @@ export class TranslationController {
   }
 
   private async translateAndShow(text: string, point: Electron.Point): Promise<void> {
+    // Each new selection starts as a transient popup; the user can pin the
+    // current result explicitly.
+    this.pinned = false;
     this.showState({ status: "loading", sourceText: text, pinned: this.pinned }, point);
     try {
       const translation = this.settings.get().translation;
@@ -293,7 +308,7 @@ export class TranslationController {
       alwaysOnTop: true,
       skipTaskbar: true,
       transparent: true,
-      hasShadow: true,
+      hasShadow: false,
       backgroundColor: "#00000000",
       minimizable: false,
       maximizable: false,
@@ -307,6 +322,11 @@ export class TranslationController {
     });
     this.window.on("closed", () => {
       this.window = null;
+    });
+    this.window.on("blur", () => {
+      // An unpinned translation is a transient popup: clicking elsewhere closes
+      // it. Pinned results deliberately stay above other windows.
+      if (!this.pinned) this.hide();
     });
     void this.window.loadFile(
       path.join(__dirname, "..", "renderer", "translation", "index.html"),
@@ -329,10 +349,19 @@ export class TranslationController {
         ? yBelow
         : Math.max(display.workArea.y, point.y - height - 14);
     window.setBounds({ x, y, width, height });
+    window.setAlwaysOnTop(true, this.pinned ? "pop-up-menu" : "floating");
     const send = () => this.sendState(state);
     if (window.webContents.isLoading()) window.webContents.once("did-finish-load", send);
     else send();
-    window.showInactive();
+    // Focus the popup so a click on any other window produces a blur and closes
+    // the unpinned card. The native helper makes foreground activation reliable
+    // when this was triggered by a global mouse hook.
+    window.show();
+    window.focus();
+    const handle = window.getNativeWindowHandle();
+    const nativeHandle =
+      handle.length >= 8 ? handle.readBigUInt64LE(0) : BigInt(handle.readUInt32LE(0));
+    void this.helper.focusWindow(nativeHandle).catch(() => undefined);
     if (this.autoHideTimer) clearTimeout(this.autoHideTimer);
     if (!this.pinned) {
       this.autoHideTimer = setTimeout(() => this.hide(), 14_000);

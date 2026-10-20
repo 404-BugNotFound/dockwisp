@@ -15,8 +15,8 @@
     "test": "tsc -p tsconfig.test.json && node --test dist-test/tests/*.test.js",
     "test:native": "node scripts/test-native.mjs",
     "test:translation-live": "node scripts/check-translation.mjs",
-    "test:smoke": "npm run build && node scripts/run-electron.mjs --smoke-test",
-    "verify": "npm run test && npm run build && npm run test:native && node scripts/run-electron.mjs --smoke-test",
+    "test:smoke": "npm run build && node scripts/run-electron.mjs --smoke-test --user-data-dir=temp/smoke-userdata",
+    "verify": "npm run test && npm run build && npm run test:native && node scripts/run-electron.mjs --smoke-test --user-data-dir=temp/smoke-userdata",
     "start": "npm run build && node scripts/run-electron.mjs",
     "dev": "npm run build && node scripts/run-electron.mjs --dev",
     "dist": "npm run verify && electron-builder --win nsis"
@@ -72,6 +72,10 @@
       {
         "from": "native/portable/License.txt",
         "to": "native/Everything-License.txt"
+      },
+      {
+        "from": "native/ocr.ps1",
+        "to": "native/ocr.ps1"
       }
     ],
     "win": {

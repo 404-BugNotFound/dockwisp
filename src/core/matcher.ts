@@ -79,7 +79,9 @@ export function normalizePluginCommands(plugin: LoadedPlugin): NormalizedCommand
           : type === "base"
             ? label.toLowerCase()
             : undefined;
-      const forms = buildSearchForms(`${label} ${feature.description ?? ""}`);
+      const forms = buildSearchForms(
+        `${label} ${feature.description ?? ""} ${plugin.manifest.pluginName}`,
+      );
       const windowMatch =
         type === "window" && source.match && typeof source.match === "object"
           ? source.match

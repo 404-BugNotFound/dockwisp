@@ -1,5 +1,35 @@
 const THEME_VALUES = ["system", "light", "dark"];
 const THEME_CACHE_KEY = "dockwisp.theme";
+const TRANSPARENCY_CACHE_KEY = "dockwisp.panelTransparency";
+const DEFAULT_PANEL_TRANSPARENCY = 12;
+
+function normalizePanelTransparency(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return DEFAULT_PANEL_TRANSPARENCY;
+  return Math.min(40, Math.max(0, Math.round(numeric)));
+}
+
+function readCachedPanelTransparency() {
+  try {
+    return normalizePanelTransparency(window.localStorage.getItem(TRANSPARENCY_CACHE_KEY));
+  } catch {
+    return DEFAULT_PANEL_TRANSPARENCY;
+  }
+}
+
+function applyPanelTransparency(value) {
+  const percent = normalizePanelTransparency(value);
+  document.documentElement.style.setProperty("--panel-alpha", String((100 - percent) / 100));
+  const slider = document.querySelector("#panel-transparency");
+  if (slider && Number(slider.value) !== percent) slider.value = String(percent);
+  const label = document.querySelector("#panel-transparency-value");
+  if (label) label.textContent = `${percent}%`;
+  try {
+    window.localStorage.setItem(TRANSPARENCY_CACHE_KEY, String(percent));
+  } catch {
+    // Ignore storage failures.
+  }
+}
 
 function normalizeTheme(value) {
   return THEME_VALUES.includes(value) ? value : "system";
@@ -33,8 +63,9 @@ function applyTheme(theme) {
   }
 }
 
-// Apply the cached theme before any DOM query to minimize first-paint flicker.
+// Apply the cached theme/transparency before any DOM query to minimize flicker.
 applyTheme(readCachedTheme());
+applyPanelTransparency(readCachedPanelTransparency());
 
 const api = window.dockwisp;
 const launcher = document.querySelector("#launcher");
@@ -52,7 +83,8 @@ const MAX_VISIBLE_ROWS = 8;
 const ROW_HEIGHT = 64; // one result row incl. margin
 const BAR_HEIGHT = 64;
 const LIST_PADDING = 20; // results top+bottom padding (8px top + 12px bottom)
-const SETTINGS_HEIGHT = 600;
+const SETTINGS_WIDTH = 1000;
+const SETTINGS_HEIGHT = 660;
 
 let matches = [];
 let homeMatches = [];
@@ -68,6 +100,135 @@ let pointerY = -1;
 let hoverOriginX = -1;
 let hoverOriginY = -1;
 let hoverArmed = false;
+let windowDragEnabled = true;
+let windowDrag = null;
+let suppressNextClick = false;
+
+const WINDOW_DRAG_THRESHOLD = 4;
+const WINDOW_DRAG_EDGE = 10;
+const WINDOW_DRAG_SIDE = 48;
+
+function isEdgeDragZone(event) {
+  const rect = searchBar.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  return (
+    y < WINDOW_DRAG_EDGE ||
+    y > rect.height - WINDOW_DRAG_EDGE ||
+    x < WINDOW_DRAG_SIDE ||
+    x > rect.width - WINDOW_DRAG_SIDE
+  );
+}
+
+function isWindowDragZone(event) {
+  // The trailing settings icon supports both click and drag.
+  if (event.target.closest("#open-settings")) return true;
+  return isEdgeDragZone(event);
+}
+
+function clearDragCursor() {
+  searchBar.classList.remove("drag-zone");
+  query.classList.remove("drag-zone");
+}
+
+function updateDragCursor(event) {
+  if (!windowDragEnabled) {
+    clearDragCursor();
+    return;
+  }
+  const overBrand = event.target.closest("#open-settings");
+  const edge = !overBrand && isEdgeDragZone(event);
+  searchBar.classList.toggle("drag-zone", edge);
+  query.classList.toggle("drag-zone", edge);
+}
+
+// Suppress the click that follows a drag (important for the settings icon).
+searchBar.addEventListener(
+  "click",
+  (event) => {
+    if (!suppressNextClick) return;
+    suppressNextClick = false;
+    event.preventDefault();
+    event.stopPropagation();
+  },
+  true,
+);
+searchBar.addEventListener("pointermove", updateDragCursor);
+searchBar.addEventListener("pointerleave", clearDragCursor);
+
+function applyWindowDragSetting(enabled) {
+  windowDragEnabled = enabled !== false;
+  document.body.classList.toggle("window-drag-disabled", !windowDragEnabled);
+  if (!windowDragEnabled) clearDragCursor();
+  const choices = document.querySelector("#window-drag-choices");
+  if (!choices) return;
+  for (const button of choices.querySelectorAll("[data-drag-choice]")) {
+    const active =
+      (button.dataset.dragChoice === "enabled") === windowDragEnabled;
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+    button.classList.toggle("is-active", active);
+  }
+}
+
+function finishWindowDrag(event) {
+  if (!windowDrag) return;
+  const { pointerId, active } = windowDrag;
+  windowDrag = null;
+  document.body.classList.remove("window-dragging");
+  try {
+    searchBar.releasePointerCapture(pointerId);
+  } catch {
+    // The pointer may already be released.
+  }
+  if (active && api && typeof api.dragEnd === "function") api.dragEnd();
+  if (active) {
+    suppressNextClick = true;
+    setTimeout(() => {
+      suppressNextClick = false;
+    }, 250);
+  }
+}
+
+// Hold anywhere on the search bar (except the settings icon) to move the
+// window. A small threshold keeps normal clicks/caret placement working.
+searchBar.addEventListener("pointerdown", (event) => {
+  if (!windowDragEnabled || event.button !== 0 || windowDrag) return;
+  if (!isWindowDragZone(event)) return;
+  windowDrag = {
+    pointerId: event.pointerId,
+    startX: event.screenX,
+    startY: event.screenY,
+    active: false,
+  };
+});
+
+searchBar.addEventListener("pointermove", (event) => {
+  if (!windowDrag || event.pointerId !== windowDrag.pointerId) return;
+  const dx = event.screenX - windowDrag.startX;
+  const dy = event.screenY - windowDrag.startY;
+  if (!windowDrag.active) {
+    if (Math.hypot(dx, dy) < WINDOW_DRAG_THRESHOLD) return;
+    windowDrag.active = true;
+    document.body.classList.add("window-dragging");
+    try {
+      searchBar.setPointerCapture(windowDrag.pointerId);
+    } catch {
+      // Capture is best-effort; the window follows the cursor either way.
+    }
+    if (api && typeof api.dragStart === "function") {
+      api.dragStart(windowDrag.startX, windowDrag.startY);
+    }
+  }
+  event.preventDefault();
+  if (api && typeof api.dragMove === "function") {
+    api.dragMove(event.screenX, event.screenY);
+  }
+});
+
+searchBar.addEventListener("pointerup", finishWindowDrag);
+searchBar.addEventListener("pointercancel", finishWindowDrag);
+searchBar.addEventListener("lostpointercapture", finishWindowDrag);
+window.addEventListener("blur", () => finishWindowDrag(null));
 
 function clearFilePoll() {
   if (filePollTimer) {
@@ -152,7 +313,7 @@ function applyResize() {
   const height = desiredHeight();
   if (height === lastResizeHeight) return;
   lastResizeHeight = height;
-  api.resize(height);
+  api.resize(height, settingsPanel.hidden ? undefined : SETTINGS_WIDTH);
 }
 
 function renderResults() {
@@ -411,6 +572,9 @@ function canRunAsAdmin(match) {
 function buildContextItems(match) {
   const items = [];
   if (match.kind === "app" || match.kind === "file") {
+    if (match.kind === "file") {
+      items.push({ action: "preview", label: "预览" });
+    }
     items.push({ action: "open", label: "打开" });
     items.push({ action: "reveal", label: "打开所在目录" });
     items.push({ action: "copy-path", label: "复制路径" });
@@ -581,16 +745,147 @@ document.addEventListener("drop", async (event) => {
 });
 
 /* ---------- settings ---------- */
-async function openSettings() {
+const HUB_PAGES = new Set(["settings", "plugins"]);
+let hubPage = "settings";
+let pluginList = [];
+
+function showHubPage(page = "settings") {
+  const next = HUB_PAGES.has(page) ? page : "settings";
+  hubPage = next;
+  for (const button of document.querySelectorAll(".nav-item[data-page]")) {
+    const active = button.dataset.page === next;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-current", active ? "page" : "false");
+  }
+  document.querySelector("#page-settings").hidden = next !== "settings";
+  document.querySelector("#page-plugins").hidden = next !== "plugins";
+  document.querySelector("#save-settings").hidden = next !== "settings";
+  if (next === "plugins") void loadPlugins();
+}
+
+function createPluginCard(plugin) {
+  const card = document.createElement("div");
+  card.className = "plugin-card";
+  card.setAttribute("role", "listitem");
+  card.tabIndex = 0;
+  card.title = plugin.builtin ? "打开截图工具" : `搜索 ${plugin.name} 的功能`;
+
+  const head = document.createElement("div");
+  head.className = "plugin-card-head";
+  if (plugin.iconUrl) {
+    const icon = document.createElement("img");
+    icon.className = "plugin-icon";
+    icon.src = plugin.iconUrl;
+    icon.alt = "";
+    head.append(icon);
+  } else {
+    const fallback = document.createElement("span");
+    fallback.className = "plugin-icon fallback";
+    fallback.textContent = plugin.name ? plugin.name.slice(0, 1) : "✦";
+    head.append(fallback);
+  }
+  const title = document.createElement("div");
+  title.className = "plugin-title";
+  const name = document.createElement("div");
+  name.className = "plugin-name";
+  name.textContent = plugin.name || plugin.id;
+  const version = document.createElement("div");
+  version.className = "plugin-version";
+  version.textContent = plugin.builtin ? "内置工具" : `v${plugin.version || "0.0.0"}`;
+  title.append(name, version);
+  head.append(title);
+  card.append(head);
+
+  const description = document.createElement("div");
+  description.className = "plugin-desc";
+  description.textContent = plugin.description || "已安装插件";
+  card.append(description);
+
+  const foot = document.createElement("div");
+  foot.className = "plugin-foot";
+  const count = document.createElement("span");
+  count.textContent = `${plugin.featureCount || 0} 个功能`;
+  foot.append(count);
+  if (plugin.builtin) {
+    const badge = document.createElement("span");
+    badge.className = "plugin-badge";
+    badge.textContent = "内置";
+    foot.append(badge);
+  }
+  card.append(foot);
+
+  const activate = () => {
+    if (plugin.builtin) {
+      closeSettings();
+      if (api && typeof api.startScreenshot === "function") api.startScreenshot();
+      return;
+    }
+    closeSettings();
+    query.value = plugin.name;
+    runSearch();
+    query.focus();
+  };
+  card.addEventListener("click", activate);
+  card.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      activate();
+    }
+  });
+  return card;
+}
+
+function fuzzyPluginMatch(text, query) {
+  const haystack = String(text || "").toLowerCase();
+  const needle = String(query || "").toLowerCase();
+  if (!needle) return true;
+  if (haystack.includes(needle)) return true;
+  // Subsequence match: "j工" still finds "JSON 工具".
+  let index = 0;
+  for (const character of needle) {
+    index = haystack.indexOf(character, index);
+    if (index < 0) return false;
+    index += 1;
+  }
+  return true;
+}
+
+function renderPluginGrid() {
+  const grid = document.querySelector("#plugin-grid");
+  const empty = document.querySelector("#plugin-empty");
+  if (!grid || !empty) return;
+  const filter = (document.querySelector("#plugin-search")?.value || "").trim();
+  const items = pluginList.filter((plugin) =>
+    fuzzyPluginMatch(`${plugin.name} ${plugin.description}`, filter),
+  );
+  grid.replaceChildren(...items.map(createPluginCard));
+  empty.hidden = items.length > 0;
+}
+
+async function loadPlugins() {
+  if (!api || typeof api.listPlugins !== "function") return;
+  try {
+    pluginList = (await api.listPlugins()) || [];
+    renderPluginGrid();
+  } catch (error) {
+    document.querySelector("#settings-status").textContent =
+      error.message || String(error);
+  }
+}
+
+async function openSettings(page = "settings") {
   closeContextMenu();
   clearFilePoll();
   launcher.hidden = true;
   settingsPanel.hidden = false;
   lastResizeHeight = 0;
-  api.resize(SETTINGS_HEIGHT);
+  api.resize(SETTINGS_HEIGHT, SETTINGS_WIDTH);
   const settings = await api.getSettings();
   applyTheme(settings.theme);
+  applyWindowDragSetting(settings.windowDragEnabled);
+  applyPanelTransparency(settings.panelTransparency);
   document.querySelector("#hotkey").value = settings.hotkey;
+  document.querySelector("#screenshot-hotkey").value = settings.screenshotHotkey || "";
   document.querySelector("#long-press").value = settings.longPressMs;
   document.querySelector("#translation-enabled").checked = settings.translationEnabled;
   document.querySelector("#launch-at-login").checked = settings.launchAtLogin;
@@ -603,6 +898,11 @@ async function openSettings() {
     ? `快捷键已启用 · ${settings.registeredHotkey}`
     : "快捷键注册失败";
   hotkeyState.className = `health-badge ${settings.registeredHotkey ? "ok" : "warn"}`;
+  const screenshotHotkeyState = document.querySelector("#screenshot-hotkey-state");
+  screenshotHotkeyState.textContent = settings.registeredScreenshotHotkey
+    ? `截图快捷键已启用 · ${settings.registeredScreenshotHotkey}`
+    : "截图快捷键注册失败";
+  screenshotHotkeyState.className = `health-badge ${settings.registeredScreenshotHotkey ? "ok" : "warn"}`;
   const helperState = document.querySelector("#helper-state");
   helperState.textContent = settings.inputHelperReady ? "原生输入服务正常" : "原生输入服务未就绪";
   helperState.className = `health-badge ${settings.inputHelperReady ? "ok" : "warn"}`;
@@ -616,12 +916,16 @@ async function openSettings() {
     ...(settings.pluginErrors || []).map((item) => `${item.directory}: ${item.message}`),
   ];
   document.querySelector("#settings-status").textContent = diagnostics.join("\n") || "所有配置均可用";
+  const version = document.querySelector("#hub-version");
+  if (version) version.textContent = settings.appVersion ? `v${settings.appVersion}` : "";
+  showHubPage(page);
 }
 
 function closeSettings() {
   settingsPanel.hidden = true;
   launcher.hidden = false;
   lastResizeHeight = 0;
+  api.resize(BAR_HEIGHT);
   query.focus();
   runSearch();
 }
@@ -641,6 +945,11 @@ document.querySelector("#save-settings").addEventListener("click", async () => {
   try {
     const saved = await api.updateSettings({
       hotkey: document.querySelector("#hotkey").value,
+      screenshotHotkey: document.querySelector("#screenshot-hotkey").value,
+      windowDragEnabled,
+      panelTransparency: normalizePanelTransparency(
+        document.querySelector("#panel-transparency").value,
+      ),
       longPressMs: Number(document.querySelector("#long-press").value),
       translationEnabled: document.querySelector("#translation-enabled").checked,
       launchAtLogin: document.querySelector("#launch-at-login").checked,
@@ -652,19 +961,28 @@ document.querySelector("#save-settings").addEventListener("click", async () => {
       },
     });
     await openSettings();
-    document.querySelector("#settings-status").textContent = `已保存。当前快捷键：${saved.registeredHotkey || "注册失败"}`;
+    document.querySelector("#settings-status").textContent =
+      `已保存。启动快捷键：${saved.registeredHotkey || "注册失败"} · 截图快捷键：${saved.registeredScreenshotHotkey || "注册失败"}`;
   } catch (error) {
     document.querySelector("#settings-status").textContent = error.message || String(error);
   }
 });
 
 document.querySelector("#add-plugin").addEventListener("click", async () => {
-  await api.addPluginDirectory();
-  await openSettings();
+  try {
+    const added = await api.addPluginDirectory();
+    await loadPlugins();
+    if (added) {
+      document.querySelector("#settings-status").textContent = "已添加插件目录";
+    }
+  } catch (error) {
+    document.querySelector("#settings-status").textContent = error.message || String(error);
+  }
 });
 document.querySelector("#install-plugin").addEventListener("click", async () => {
   try {
     const installed = await api.installPluginPackage();
+    await loadPlugins();
     if (installed) {
       document.querySelector("#settings-status").textContent =
         `已安装：${installed.pluginName} ${installed.version}`;
@@ -673,6 +991,19 @@ document.querySelector("#install-plugin").addEventListener("click", async () => 
     document.querySelector("#settings-status").textContent = error.message || String(error);
   }
 });
+document.querySelector("#refresh-plugins").addEventListener("click", async () => {
+  try {
+    const report = await api.refresh();
+    await loadPlugins();
+    document.querySelector("#settings-status").textContent = `插件已刷新：${report.plugins} 个插件`;
+  } catch (error) {
+    document.querySelector("#settings-status").textContent = error.message || String(error);
+  }
+});
+document.querySelector("#plugin-search").addEventListener("input", renderPluginGrid);
+for (const button of document.querySelectorAll(".nav-item[data-page]")) {
+  button.addEventListener("click", () => showHubPage(button.dataset.page));
+}
 document.querySelector("#add-item").addEventListener("click", () => api.addCustomItem());
 document.querySelector("#refresh-index").addEventListener("click", async () => {
   const report = await api.refresh();
@@ -682,6 +1013,17 @@ document.querySelector("#clear-usage").addEventListener("click", async () => {
   try {
     await api.clearUsage();
     document.querySelector("#settings-status").textContent = "使用统计已清空";
+  } catch (error) {
+    document.querySelector("#settings-status").textContent = error.message || String(error);
+  }
+});
+document.querySelector("#reset-position").addEventListener("click", async () => {
+  try {
+    const result = await api.resetPosition();
+    if (result && result.ok) {
+      document.querySelector("#settings-status").textContent = "窗口位置已还原";
+      showToast("窗口位置已还原");
+    }
   } catch (error) {
     document.querySelector("#settings-status").textContent = error.message || String(error);
   }
@@ -710,7 +1052,7 @@ api.onFocus((point) => {
   }
   // Do not re-run the search on every focus; the existing view stays.
 });
-api.onOpenSettings(openSettings);
+api.onOpenSettings((page) => openSettings(page));
 api.onIndexUpdated(() => {
   if (!launcher.hidden) runSearch();
 });
@@ -732,16 +1074,53 @@ if (themeChoices) {
   });
 }
 
+/* ---------- panel transparency ---------- */
+const transparencySlider = document.querySelector("#panel-transparency");
+if (transparencySlider) {
+  transparencySlider.addEventListener("input", () => {
+    applyPanelTransparency(transparencySlider.value);
+  });
+  transparencySlider.addEventListener("change", async () => {
+    const panelTransparency = normalizePanelTransparency(transparencySlider.value);
+    applyPanelTransparency(panelTransparency);
+    try {
+      await api.updateSettings({ panelTransparency });
+    } catch (error) {
+      showToast(error.message || String(error));
+    }
+  });
+}
+
+/* ---------- window drag setting ---------- */
+const dragChoices = document.querySelector("#window-drag-choices");
+if (dragChoices) {
+  dragChoices.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-drag-choice]");
+    if (!button || !dragChoices.contains(button)) return;
+    const enabled = button.dataset.dragChoice === "enabled";
+    applyWindowDragSetting(enabled);
+    try {
+      await api.updateSettings({ windowDragEnabled: enabled });
+    } catch (error) {
+      showToast(error.message || String(error));
+    }
+  });
+}
+
 /* ---------- startup ---------- */
 query.focus();
 runSearch();
 
-// Fetch the authoritative theme; keep the cached value on failure.
+// Fetch the authoritative theme/drag preference; keep cached/default values on failure.
 if (api && typeof api.getSettings === "function") {
   api
     .getSettings()
     .then((settings) => {
       if (settings && settings.theme) applyTheme(settings.theme);
+      if (settings) {
+        applyWindowDragSetting(settings.windowDragEnabled);
+        applyPanelTransparency(settings.panelTransparency);
+      }
     })
     .catch(() => {
       // Keep the cached theme; do not surface an error.

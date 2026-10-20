@@ -30,8 +30,8 @@
           id="open-settings"
           class="brand-button"
           type="button"
-          aria-label="打开设置"
-          title="打开设置"
+          aria-label="打开 Dockwisp 中心"
+          title="打开 Dockwisp 中心"
         >
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z" />
@@ -55,14 +55,34 @@
           </svg>
         </span>
         <div>
-          <div class="brand-name">偏好设置</div>
-          <div class="title-caption">呼出方式、翻译与插件</div>
+          <div class="brand-name">Dockwisp 中心</div>
+          <div class="title-caption">插件与设置</div>
         </div>
         <span class="drag-space"></span>
         <button id="settings-back" class="soft-button" type="button">完成</button>
       </div>
 
-      <div class="settings-body">
+      <div class="hub-body">
+        <aside class="hub-nav" aria-label="功能导航">
+          <button class="nav-item is-active" type="button" data-page="settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.12.38.33.72.6 1 .3.27.68.42 1.1.42H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5.58Z"/></svg>
+            <span>设置</span>
+          </button>
+          <button class="nav-item" type="button" data-page="plugins">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 3h4v3a2 2 0 1 0 4 0h3v6h-2.5a2.5 2.5 0 1 0 0 5H21v4h-5v-2a2 2 0 1 0-4 0v2H3v-4h2a2.5 2.5 0 1 0 0-5H3V9h3a2 2 0 1 0 4 0V6h0Z"/></svg>
+            <span>插件</span>
+          </button>
+          <span class="nav-spacer"></span>
+          <div class="nav-footer"><span>Dockwisp</span><span id="hub-version"></span></div>
+        </aside>
+
+        <div class="hub-content">
+          <section id="page-settings" class="hub-page">
+            <div class="page-heading">
+              <h1>设置</h1>
+              <p>呼出方式、外观与翻译</p>
+            </div>
+            <div class="settings-grid">
         <article class="setting-card launch-card">
           <div class="card-heading">
             <span class="card-icon">⌨</span>
@@ -78,8 +98,24 @@
               <input id="launch-at-login" type="checkbox" class="toggle" />
             </label>
           </div>
+          <label class="full-row-field">
+            <span>截图快捷键</span>
+            <input id="screenshot-hotkey" type="text" placeholder="Alt+Shift+S" />
+          </label>
+          <div class="position-row">
+            <span><strong>窗口位置</strong><small>拖动搜索栏边缘或尾部图标可移动并记住位置</small></span>
+            <button id="reset-position" class="soft-button" type="button">还原默认位置</button>
+          </div>
+          <div class="appearance-row">
+            <span>窗口拖动</span>
+            <div class="theme-switch drag-switch" id="window-drag-choices" role="group" aria-label="窗口拖动">
+              <button type="button" data-drag-choice="enabled" aria-pressed="true">允许拖动</button>
+              <button type="button" data-drag-choice="disabled" aria-pressed="false">禁止拖动</button>
+            </div>
+          </div>
           <div class="health-row">
             <span id="hotkey-state" class="health-badge">快捷键状态未知</span>
+            <span id="screenshot-hotkey-state" class="health-badge">截图快捷键状态未知</span>
             <span id="helper-state" class="health-badge">输入服务状态未知</span>
           </div>
           <div class="appearance-row">
@@ -90,6 +126,10 @@
               <button type="button" data-theme-choice="dark" aria-pressed="false">深色</button>
             </div>
           </div>
+          <label class="appearance-row">
+            <span>面板透明度 <em id="panel-transparency-value">12%</em></span>
+            <input id="panel-transparency" class="opacity-slider" type="range" min="0" max="40" step="1" value="12" />
+          </label>
         </article>
 
         <article class="setting-card translation-settings-card">
@@ -120,24 +160,45 @@
           <div id="translation-diagnostics" class="diagnostic-box">尚无中键诊断数据</div>
         </article>
 
-        <article class="setting-card plugin-card">
+        <article class="setting-card content-card">
           <div class="card-heading">
             <span class="card-icon">✦</span>
-            <div><h2>内容与插件</h2><p>扩展本地搜索来源和兼容插件</p></div>
+            <div><h2>内容与索引</h2><p>本地项目、索引与使用统计</p></div>
           </div>
           <div class="action-grid">
             <button id="add-item" type="button"><span>＋</span><strong>添加本地项目</strong><small>应用、文件或目录</small></button>
-            <button id="add-plugin" type="button"><span>⌁</span><strong>添加插件目录</strong><small>开发与调试插件</small></button>
-            <button id="install-plugin" type="button"><span>↓</span><strong>安装离线插件</strong><small>UPX / UPXS</small></button>
             <button id="refresh-index" type="button"><span>↻</span><strong>刷新索引</strong><small>重新扫描全部来源</small></button>
             <button id="clear-usage" type="button"><span>⌫</span><strong>清空使用统计</strong><small>重置频率排序</small></button>
           </div>
         </article>
+            </div>
+          </section>
 
-        <div class="settings-footer">
-          <pre id="settings-status" role="status"></pre>
-          <button id="save-settings" class="primary-button" type="button">保存更改</button>
+          <section id="page-plugins" class="hub-page" hidden>
+            <div class="page-heading page-heading-row">
+              <div>
+                <h1>插件</h1>
+                <p>已安装插件与内置工具</p>
+              </div>
+              <div class="plugin-actions">
+                <button id="add-plugin" class="soft-button" type="button">添加插件目录</button>
+                <button id="install-plugin" class="soft-button" type="button">安装离线插件</button>
+                <button id="refresh-plugins" class="soft-button" type="button">刷新</button>
+              </div>
+            </div>
+            <div class="plugin-search">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="16.4" y1="16.4" x2="21" y2="21"/></svg>
+              <input id="plugin-search" type="search" placeholder="搜索插件名称或描述…" autocomplete="off" spellcheck="false" />
+            </div>
+            <div id="plugin-grid" class="plugin-grid" role="list"></div>
+            <div id="plugin-empty" class="plugin-empty" hidden>没有找到匹配的插件</div>
+          </section>
         </div>
+      </div>
+
+      <div class="settings-footer">
+        <pre id="settings-status" role="status"></pre>
+        <button id="save-settings" class="primary-button" type="button">保存更改</button>
       </div>
     </section>
   </body>

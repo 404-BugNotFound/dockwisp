@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>截图</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div id="root" data-mode="idle">
+      <!-- 清晰的全屏截图 -->
+      <img id="shot" alt="" draggable="false" />
+      <!-- 标注层：backing store 为图片原始尺寸 -->
+      <canvas id="anno"></canvas>
+      <!-- 无选区时的整屏暗化 -->
+      <div id="dim"></div>
+
+      <!-- 选区框（box-shadow 负责选区外暗化） -->
+      <div id="selection" hidden>
+        <span class="size-tag" id="sizeTag"></span>
+        <i class="handle" data-handle="nw"></i>
+        <i class="handle" data-handle="n"></i>
+        <i class="handle" data-handle="ne"></i>
+        <i class="handle" data-handle="e"></i>
+        <i class="handle" data-handle="se"></i>
+        <i class="handle" data-handle="s"></i>
+        <i class="handle" data-handle="sw"></i>
+        <i class="handle" data-handle="w"></i>
+      </div>
+
+      <!-- 底部极简提示 -->
+      <div id="hint">拖动选择区域 · Enter 全屏复制 · Esc 取消</div>
+
+      <!-- 工具栏 -->
+      <div id="toolbar" hidden>
+        <div class="tb-group" id="tools">
+          <button class="tb-btn" data-tool="rect" type="button" title="矩形 (R)" aria-label="矩形">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="1.5" /></svg>
+          </button>
+          <button class="tb-btn" data-tool="arrow" type="button" title="箭头 (A)" aria-label="箭头">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 L19 5 M19 5 L19 12 M19 5 L12 5" /></svg>
+          </button>
+          <button class="tb-btn" data-tool="pen" type="button" title="画笔 (P)" aria-label="画笔">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20 C7 14 10 8 14 5 C16 3.5 19 5 17.5 7.5 C15 11 9 14 4 20 Z" /></svg>
+          </button>
+          <button class="tb-btn" data-tool="mosaic" type="button" title="马赛克 (M)" aria-label="马赛克">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h5v5H4z M14 4h6v5h-6z M9 9h5v5H9z M4 14h5v6H4z M14 14h6v6h-6z" fill="currentColor" stroke="none"/></svg>
+          </button>
+        </div>
+
+        <span class="tb-sep"></span>
+
+        <div class="tb-group" id="colors">
+          <button class="dot" data-color="#ff4d4f" type="button" aria-label="红色"></button>
+          <button class="dot" data-color="#ffd93b" type="button" aria-label="黄色"></button>
+          <button class="dot" data-color="#4d9bff" type="button" aria-label="蓝色"></button>
+          <button class="dot" data-color="#ffffff" type="button" aria-label="白色"></button>
+        </div>
+
+        <span class="tb-sep"></span>
+
+        <button class="tb-btn" id="undo" type="button" title="撤销 (Ctrl+Z)" aria-label="撤销">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 L4 11 L9 15 M4 11 H14.5 A5 5 0 0 1 14.5 21 H10" /></svg>
+        </button>
+
+        <span class="tb-sep"></span>
+
+        <div class="tb-group">
+          <button class="tb-text" id="ocr" type="button">识别</button>
+          <button class="tb-text" id="translate" type="button">翻译</button>
+          <button class="tb-text" id="copy" type="button" title="复制并关闭 (Enter)">复制</button>
+          <button class="tb-text" id="save" type="button">保存</button>
+          <button class="tb-btn danger" id="close" type="button" title="关闭 (Esc)" aria-label="关闭">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6 L18 18 M18 6 L6 18" /></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- 结果面板 -->
+      <aside id="panel" hidden>
+        <div class="panel-head">
+          <span id="panelTitle">文字识别</span>
+          <button class="panel-close" id="panelClose" type="button" aria-label="关闭面板">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6 L18 18 M18 6 L6 18" /></svg>
+          </button>
+        </div>
+        <div class="panel-body">
+          <div id="panelLoading" class="panel-loading" hidden>
+            <span class="spinner"></span><span id="panelLoadingText">识别中…</span>
+          </div>
+          <div id="panelContent">
+            <div id="panelSourceWrap" hidden>
+              <label class="panel-label">原文</label>
+              <div id="panelSource" class="panel-source"></div>
+            </div>
+            <label class="panel-label" id="panelTextLabel">识别结果</label>
+            <textarea id="panelText" spellcheck="false"></textarea>
+          </div>
+        </div>
+        <div class="panel-foot" id="panelFoot">
+          <button class="panel-btn" id="panelSelectAll" type="button">全选</button>
+          <button class="panel-btn primary" id="panelCopy" type="button">复制</button>
+        </div>
+      </aside>
+
+      <div id="toast" hidden></div>
+    </div>
+  </body>
+</html>

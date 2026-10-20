@@ -158,7 +158,9 @@ export interface BuiltinMatch {
     | "file-indexing"
     | "system"
     | "focus-window"
-    | "window-search";
+    | "window-search"
+    | "screenshot"
+    | "plugins";
   title: string;
   subtitle: string;
   score: number;

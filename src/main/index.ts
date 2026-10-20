@@ -37,6 +37,7 @@ import {
   CommandMatch,
   CommandType,
   FileMatch,
+  LoadedPlugin,
   PinnedMatch,
   SearchInput,
   SearchMatch,
@@ -48,11 +49,19 @@ import { MouseHelper } from "./mouse-helper";
 import { PluginHost } from "./plugin-host";
 import { PluginPackageInstaller } from "./plugin-package";
 import { PluginRegistry } from "./plugin-registry";
+import { PreviewController } from "./preview-controller";
+import { ScreenshotController } from "./screenshot-controller";
 import { AppSettings, SettingsStore } from "./settings";
 import { TranslationController } from "./translation-controller";
 import { TRAY_ICON_DATA_URL } from "./tray-icon";
 import { UsageStore } from "./usage-store";
-import { createLauncherWindow, showLauncher } from "./windows";
+import {
+  createLauncherWindow,
+  defaultLauncherPosition,
+  LAUNCHER_HEIGHT,
+  LAUNCHER_WIDTH,
+  showLauncher,
+} from "./windows";
 
 app.setName("Dockwisp");
 migrateLegacyUserData();
@@ -128,6 +137,22 @@ let launcher: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quitting = false;
 let registeredHotkey = "";
+let registeredScreenshotHotkey = "";
+let screenshot: ScreenshotController | null = null;
+// Assigned once the settings store exists; lets module-level helpers read the
+// live persisted launcher position without threading the store everywhere.
+let getLauncherPosition: () => { x: number; y: number } | undefined = () => undefined;
+// Programmatic moves (show, resize, reset) must not overwrite the user's saved
+// drag position. The value is a timestamp until which `moved` events are ignored.
+let suppressLauncherPositionSaveUntil = 0;
+
+/** Show the launcher at its persisted position (or the default when unset). */
+function summonLauncher(openSettings = false): void {
+  if (launcher) {
+    suppressLauncherPositionSaveUntil = Date.now() + 450;
+    showLauncher(launcher, openSettings, getLauncherPosition());
+  }
+}
 
 function normalizeInput(raw: unknown): SearchInput {
   if (!raw || typeof raw !== "object") return { type: "text", data: "" };
@@ -162,6 +187,81 @@ interface SystemCommand {
   title: string;
   subtitle: string;
   keywords: string[];
+  iconSource?: string;
+  run?:
+    | { type: "exe"; target: string; args?: string[] }
+    | { type: "uri"; target: string }
+    | { type: "path"; target: string };
+}
+
+const system32 = (name: string): string =>
+  path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", name);
+
+const SYSTEM_ICON_FALLBACK =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f9f" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.12.38.33.72.6 1 .3.27.68.42 1.1.42H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5.58Z"/></svg>',
+  );
+
+const systemIconSvg = (body: string): string =>
+  `data:image/svg+xml,${encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f9f" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`,
+  )}`;
+
+// Category fallbacks for commands that have no executable icon (mostly
+// ms-settings URIs and Windows actions).
+const SYSTEM_ICON_URLS: Record<string, string> = {
+  lock: systemIconSvg('<rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>'),
+  sleep: systemIconSvg('<path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a7 7 0 0 0 11 11Z"/>'),
+  recycle: systemIconSvg('<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5M14 11v5"/>'),
+  mute: systemIconSvg('<path d="M4 9v6h4l5 4V5L8 9H4Z"/><path d="M17 9l4 6M21 9l-4 6"/>'),
+  "volume-up": systemIconSvg('<path d="M4 9v6h4l5 4V5L8 9H4Z"/><path d="M17 9a4 4 0 0 1 0 6M20 6a8 8 0 0 1 0 12"/>'),
+  "volume-down": systemIconSvg('<path d="M4 9v6h4l5 4V5L8 9H4Z"/><path d="M17 9a4 4 0 0 1 0 6"/>'),
+  shutdown: systemIconSvg('<path d="M12 3v9"/><path d="M7 6a8 8 0 1 0 10 0"/>'),
+  restart: systemIconSvg('<path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/>'),
+  settings: SYSTEM_ICON_FALLBACK,
+  "display-settings": systemIconSvg('<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>'),
+  "sound-settings": systemIconSvg('<path d="M4 9v6h4l5 4V5L8 9H4Z"/><path d="M17 9a4 4 0 0 1 0 6"/>'),
+  "network-settings": systemIconSvg('<circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4a12 12 0 0 1 0 16M12 4a12 12 0 0 0 0 16"/>'),
+  "bluetooth-settings": systemIconSvg('<path d="M7 7l10 10-5 4V3l5 4L7 17"/>'),
+  "apps-settings": systemIconSvg('<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>'),
+  "windows-update": systemIconSvg('<path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/>'),
+  personalization: systemIconSvg('<circle cx="12" cy="12" r="9"/><path d="M12 21a3 3 0 0 1 0-6c1.7 0 3-1.3 3-3"/>'),
+  "privacy-settings": systemIconSvg('<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3Z"/>'),
+  "datetime-settings": systemIconSvg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
+  "mouse-settings": systemIconSvg('<rect x="7" y="3" width="10" height="18" rx="5"/><path d="M12 3v7"/>'),
+  "storage-settings": systemIconSvg('<rect x="3" y="5" width="18" height="6" rx="2"/><rect x="3" y="13" width="18" height="6" rx="2"/><path d="M7 8h.01M7 16h.01"/>'),
+  "windows-security": systemIconSvg('<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3Z"/><path d="M9 12l2 2 4-4"/>'),
+  firewall: systemIconSvg('<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3Z"/><path d="M9 9h6M9 13h6"/>'),
+  printers: systemIconSvg('<path d="M7 8V3h10v5M7 17H5a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-2"/><rect x="7" y="14" width="10" height="7" rx="1"/>'),
+  "default-apps": systemIconSvg('<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>'),
+  fonts: systemIconSvg('<path d="M6 4h12M12 4v16M8 20h8"/>'),
+  "remote-desktop": systemIconSvg('<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4M8 10l-2 2 2 2M16 10l2 2-2 2"/>'),
+  "system-info": systemIconSvg('<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>'),
+  "system-properties": systemIconSvg('<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>'),
+  dxdiag: systemIconSvg('<rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9z"/>'),
+  winver: systemIconSvg('<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>'),
+  "resource-monitor": systemIconSvg('<path d="M3 12h4l2-6 4 12 2-6h6"/>'),
+  "performance-monitor": systemIconSvg('<path d="M3 12h4l2-6 4 12 2-6h6"/>'),
+};
+
+const systemIconCache = new Map<string, string>();
+
+async function warmSystemIcons(): Promise<void> {
+  await Promise.all(
+    SYSTEM_COMMANDS.map(async (command) => {
+      const source =
+        command.iconSource ??
+        (command.run && command.run.type !== "uri" ? command.run.target : undefined);
+      if (!source || !path.isAbsolute(source)) return;
+      try {
+        const icon = await app.getFileIcon(source, { size: "large" });
+        if (!icon.isEmpty()) systemIconCache.set(command.id, icon.toDataURL());
+      } catch {
+        // Optional Windows components may be missing; use the fallback icon.
+      }
+    }),
+  );
 }
 
 const SYSTEM_COMMANDS: SystemCommand[] = [
@@ -193,6 +293,7 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
     title: "任务管理器",
     subtitle: "打开任务管理器",
     keywords: ["任务管理器", "taskmgr"],
+    iconSource: system32("Taskmgr.exe"),
   },
   {
     id: "settings",
@@ -205,6 +306,289 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
     title: "资源管理器",
     subtitle: "打开文件资源管理器",
     keywords: ["资源管理器", "explorer"],
+    iconSource: system32("explorer.exe"),
+  },
+  {
+    id: "control-panel",
+    title: "控制面板",
+    subtitle: "打开 Windows 控制面板",
+    keywords: ["控制面板", "control panel", "control"],
+    run: { type: "exe", target: system32("control.exe") },
+  },
+  {
+    id: "regedit",
+    title: "注册表编辑器",
+    subtitle: "打开注册表编辑器",
+    keywords: ["注册表", "注册表编辑器", "regedit"],
+    run: { type: "exe", target: system32("regedit.exe") },
+  },
+  {
+    id: "terminal",
+    title: "终端（命令提示符）",
+    subtitle: "打开命令提示符终端",
+    keywords: ["终端", "命令提示符", "cmd", "terminal"],
+    run: { type: "exe", target: system32("cmd.exe") },
+  },
+  {
+    id: "powershell",
+    title: "PowerShell",
+    subtitle: "打开 Windows PowerShell",
+    keywords: ["powershell", "ps", "命令行"],
+    run: {
+      type: "exe",
+      target: path.join(
+        process.env.SystemRoot ?? "C:\\Windows",
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+      ),
+    },
+  },
+  {
+    id: "windows-terminal",
+    title: "Windows 终端",
+    subtitle: "打开 Windows Terminal",
+    keywords: ["windows terminal", "wt", "终端"],
+    run: { type: "exe", target: "wt.exe" },
+  },
+  {
+    id: "device-manager",
+    title: "设备管理器",
+    subtitle: "查看和管理硬件设备",
+    keywords: ["设备管理器", "设备管理", "devmgmt"],
+    run: { type: "path", target: system32("devmgmt.msc") },
+  },
+  {
+    id: "services",
+    title: "服务",
+    subtitle: "管理 Windows 服务",
+    keywords: ["服务", "services", "services.msc"],
+    run: { type: "path", target: system32("services.msc") },
+  },
+  {
+    id: "disk-management",
+    title: "磁盘管理",
+    subtitle: "管理磁盘分区与卷",
+    keywords: ["磁盘管理", "分区", "diskmgmt"],
+    run: { type: "path", target: system32("diskmgmt.msc") },
+  },
+  {
+    id: "event-viewer",
+    title: "事件查看器",
+    subtitle: "查看系统和应用事件日志",
+    keywords: ["事件查看器", "事件日志", "eventvwr"],
+    run: { type: "path", target: system32("eventvwr.msc") },
+  },
+  {
+    id: "task-scheduler",
+    title: "任务计划程序",
+    subtitle: "管理计划任务",
+    keywords: ["任务计划", "任务计划程序", "taskschd"],
+    run: { type: "path", target: system32("taskschd.msc") },
+  },
+  {
+    id: "programs-features",
+    title: "程序和功能",
+    subtitle: "卸载或更改已安装的程序",
+    keywords: ["程序和功能", "卸载程序", "appwiz"],
+    run: { type: "exe", target: system32("control.exe"), args: ["appwiz.cpl"] },
+  },
+  {
+    id: "power-options",
+    title: "电源选项",
+    subtitle: "配置电源计划与睡眠行为",
+    keywords: ["电源选项", "电源计划", "powercfg"],
+    run: { type: "exe", target: system32("control.exe"), args: ["powercfg.cpl"] },
+  },
+  {
+    id: "network-connections",
+    title: "网络连接",
+    subtitle: "查看和配置网络适配器",
+    keywords: ["网络连接", "网卡", "ncpa"],
+    run: { type: "exe", target: system32("control.exe"), args: ["ncpa.cpl"] },
+  },
+  {
+    id: "system-info",
+    title: "系统信息",
+    subtitle: "查看计算机硬件与系统信息",
+    keywords: ["系统信息", "硬件信息", "msinfo"],
+    run: { type: "exe", target: system32("msinfo32.exe") },
+  },
+  {
+    id: "resource-monitor",
+    title: "资源监视器",
+    subtitle: "实时查看 CPU、内存、磁盘和网络",
+    keywords: ["资源监视器", "性能监控", "resmon"],
+    run: { type: "exe", target: system32("resmon.exe") },
+  },
+  {
+    id: "performance-monitor",
+    title: "性能监视器",
+    subtitle: "打开 Windows 性能监视器",
+    keywords: ["性能监视器", "perfmon"],
+    run: { type: "exe", target: system32("perfmon.exe") },
+  },
+  {
+    id: "computer-management",
+    title: "计算机管理",
+    subtitle: "集中管理设备、磁盘和服务",
+    keywords: ["计算机管理", "compmgmt"],
+    run: { type: "path", target: system32("compmgmt.msc") },
+  },
+  {
+    id: "group-policy",
+    title: "本地组策略编辑器",
+    subtitle: "打开本地组策略编辑器",
+    keywords: ["组策略", "组策略编辑器", "gpedit"],
+    run: { type: "path", target: system32("gpedit.msc") },
+  },
+  {
+    id: "system-config",
+    title: "系统配置",
+    subtitle: "启动项与系统诊断配置",
+    keywords: ["系统配置", "启动项", "msconfig"],
+    run: { type: "exe", target: system32("msconfig.exe") },
+  },
+  {
+    id: "system-properties",
+    title: "系统属性",
+    subtitle: "查看计算机名、硬件和高级设置",
+    keywords: ["系统属性", "计算机名", "sysdm"],
+    run: { type: "exe", target: system32("control.exe"), args: ["sysdm.cpl"] },
+  },
+  {
+    id: "windows-security",
+    title: "Windows 安全中心",
+    subtitle: "病毒防护与设备安全性",
+    keywords: ["安全中心", "windows defender", "defender", "杀毒"],
+    run: { type: "uri", target: "ms-settings:windowsdefender" },
+  },
+  {
+    id: "firewall",
+    title: "防火墙",
+    subtitle: "Windows Defender 防火墙设置",
+    keywords: ["防火墙", "firewall"],
+    run: { type: "exe", target: system32("control.exe"), args: ["firewall.cpl"] },
+  },
+  {
+    id: "printers",
+    title: "打印机和扫描仪",
+    subtitle: "管理打印机与扫描设备",
+    keywords: ["打印机", "扫描仪", "printers"],
+    run: { type: "uri", target: "ms-settings:printers" },
+  },
+  {
+    id: "default-apps",
+    title: "默认应用",
+    subtitle: "配置文件类型和协议的默认程序",
+    keywords: ["默认应用", "默认程序", "default apps"],
+    run: { type: "uri", target: "ms-settings:defaultapps" },
+  },
+  {
+    id: "fonts",
+    title: "字体",
+    subtitle: "查看和安装系统字体",
+    keywords: ["字体", "fonts"],
+    run: { type: "uri", target: "ms-settings:fonts" },
+  },
+  {
+    id: "remote-desktop",
+    title: "远程桌面",
+    subtitle: "远程桌面连接与设置",
+    keywords: ["远程桌面", "远程连接", "remote desktop", "mstsc"],
+    run: { type: "uri", target: "ms-settings:remotedesktop" },
+  },
+  {
+    id: "dxdiag",
+    title: "DirectX 诊断工具",
+    subtitle: "查看显卡和音频设备信息",
+    keywords: ["directx", "dxdiag", "显卡信息"],
+    run: { type: "exe", target: system32("dxdiag.exe") },
+  },
+  {
+    id: "winver",
+    title: "Windows 版本",
+    subtitle: "查看 Windows 版本信息",
+    keywords: ["windows 版本", "系统版本", "winver"],
+    run: { type: "exe", target: system32("winver.exe") },
+  },
+  {
+    id: "display-settings",
+    title: "显示设置",
+    subtitle: "分辨率、缩放与多显示器",
+    keywords: ["显示设置", "分辨率", "缩放", "display"],
+    run: { type: "uri", target: "ms-settings:display" },
+  },
+  {
+    id: "sound-settings",
+    title: "声音设置",
+    subtitle: "输出设备与音量设置",
+    keywords: ["声音设置", "音频设置", "sound"],
+    run: { type: "uri", target: "ms-settings:sound" },
+  },
+  {
+    id: "network-settings",
+    title: "网络设置",
+    subtitle: "Wi-Fi、以太网与代理设置",
+    keywords: ["网络设置", "wifi", "以太网", "network"],
+    run: { type: "uri", target: "ms-settings:network" },
+  },
+  {
+    id: "bluetooth-settings",
+    title: "蓝牙设置",
+    subtitle: "管理蓝牙设备",
+    keywords: ["蓝牙", "bluetooth"],
+    run: { type: "uri", target: "ms-settings:bluetooth" },
+  },
+  {
+    id: "apps-settings",
+    title: "应用和功能",
+    subtitle: "管理已安装的应用",
+    keywords: ["应用和功能", "应用管理", "apps"],
+    run: { type: "uri", target: "ms-settings:appsfeatures" },
+  },
+  {
+    id: "windows-update",
+    title: "Windows 更新",
+    subtitle: "检查并安装系统更新",
+    keywords: ["windows 更新", "系统更新", "update"],
+    run: { type: "uri", target: "ms-settings:windowsupdate" },
+  },
+  {
+    id: "personalization",
+    title: "个性化",
+    subtitle: "主题、壁纸与颜色",
+    keywords: ["个性化", "壁纸", "主题", "personalization"],
+    run: { type: "uri", target: "ms-settings:personalization" },
+  },
+  {
+    id: "privacy-settings",
+    title: "隐私设置",
+    subtitle: "应用权限与隐私选项",
+    keywords: ["隐私", "权限", "privacy"],
+    run: { type: "uri", target: "ms-settings:privacy" },
+  },
+  {
+    id: "datetime-settings",
+    title: "日期和时间",
+    subtitle: "时间、时区与日期格式",
+    keywords: ["日期和时间", "时间设置", "时区", "datetime"],
+    run: { type: "uri", target: "ms-settings:dateandtime" },
+  },
+  {
+    id: "mouse-settings",
+    title: "鼠标设置",
+    subtitle: "指针、滚轮与鼠标按键",
+    keywords: ["鼠标设置", "鼠标", "mouse"],
+    run: { type: "uri", target: "ms-settings:mousetouchpad" },
+  },
+  {
+    id: "storage-settings",
+    title: "存储设置",
+    subtitle: "磁盘空间与存储感知",
+    keywords: ["存储设置", "磁盘空间", "storage"],
+    run: { type: "uri", target: "ms-settings:storagesense" },
   },
 ];
 
@@ -239,6 +623,10 @@ function systemMatches(query: string, lower: string): BuiltinMatch[] {
       subtitle: command.subtitle,
       score,
       payload: command.id,
+      iconUrl:
+        systemIconCache.get(command.id) ??
+        SYSTEM_ICON_URLS[command.id] ??
+        SYSTEM_ICON_FALLBACK,
     }));
 }
 
@@ -248,14 +636,26 @@ function builtinMatches(input: SearchInput): BuiltinMatch[] {
   if (!query) return [];
   const lower = query.toLowerCase();
   const matches: BuiltinMatch[] = [];
-  if ("设置".includes(query) || "settings".startsWith(lower)) {
+  if ("设置".includes(query) || query.startsWith("设置") || "settings".startsWith(lower)) {
     matches.push({
       id: "builtin:settings",
       kind: "builtin",
       action: "settings",
       title: "设置",
-      subtitle: "快捷键、插件目录与翻译服务",
-      score: 920,
+      subtitle: "快捷键、外观与翻译服务",
+      score: 1_260,
+      iconUrl: SYSTEM_ICON_URLS.settings,
+    });
+  }
+  if (query.startsWith("插件") || "plugins".startsWith(lower)) {
+    matches.push({
+      id: "builtin:plugins",
+      kind: "builtin",
+      action: "plugins",
+      title: "插件",
+      subtitle: "管理已安装插件与内置工具",
+      score: 1_255,
+      iconUrl: PLUGIN_ICON_URL,
     });
   }
   const explicit = query.match(/^(?:翻译|translate)\s+(.+)$/i);
@@ -284,6 +684,23 @@ function builtinMatches(input: SearchInput): BuiltinMatch[] {
       payload: "",
     });
   }
+  if (
+    query.startsWith("截") ||
+    query.includes("截图") ||
+    query.includes("截屏") ||
+    "screenshot".startsWith(lower) ||
+    "capture".startsWith(lower)
+  ) {
+    matches.push({
+      id: "builtin:screenshot",
+      kind: "builtin",
+      action: "screenshot",
+      title: "截图",
+      subtitle: "区域截图 · 编辑 · OCR · 翻译",
+      score: 1_250,
+      iconUrl: SCREENSHOT_ICON_URL,
+    });
+  }
   matches.push(...systemMatches(query, lower));
   // Offer a full-disk file search for any normal text query; choosing it flips
   // the input into file-search mode (handled by the renderer).
@@ -295,6 +712,7 @@ function builtinMatches(input: SearchInput): BuiltinMatch[] {
     subtitle: "Everything 全盘文件搜索",
     score: 100,
     payload: query,
+    iconUrl: FILE_SEARCH_ICON_URL,
   });
   return matches;
 }
@@ -403,6 +821,45 @@ function sha1(value: string): string {
 }
 
 const iconCache = new Map<string, string>();
+
+const SCREENSHOT_ICON_URL =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/></svg>',
+  );
+
+const PLUGIN_ICON_URL =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3h4v3a2 2 0 1 0 4 0h3v6h-2.5a2.5 2.5 0 1 0 0 5H21v4h-5v-2a2 2 0 1 0-4 0v2H3v-4h2a2.5 2.5 0 1 0 0-5H3V9h3a2 2 0 1 0 4 0V6h0Z"/></svg>',
+  );
+
+const FILE_SEARCH_ICON_URL =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M16.4 16.4 21 21"/></svg>',
+  );
+
+function pluginIconUrl(plugin: LoadedPlugin): string | undefined {
+  const logo = plugin.manifest.logo;
+  if (!logo) return undefined;
+  const filePath = path.resolve(plugin.directory, logo);
+  if (!existsSync(filePath)) return undefined;
+  try {
+    const image = nativeImage.createFromPath(filePath);
+    return image.isEmpty() ? undefined : image.toDataURL();
+  } catch {
+    return undefined;
+  }
+}
+
+function pluginDescription(plugin: LoadedPlugin): string {
+  const descriptions = plugin.manifest.features
+    .map((feature) => feature.description || feature.explain)
+    .filter((value): value is string => typeof value === "string" && value.trim() !== "");
+  if (descriptions.length === 0) return `${plugin.manifest.features.length} 个可用功能`;
+  return [...new Set(descriptions)].slice(0, 2).join(" · ");
+}
 
 async function appIconUrl(filePath: string): Promise<string | undefined> {
   if (!filePath || !existsSync(filePath)) return undefined;
@@ -579,15 +1036,31 @@ async function registerHotkey(
     registeredHotkey = "Alt+Space";
     return;
   }
-  if (globalShortcut.register(settings.hotkey, () => launcher && showLauncher(launcher))) {
+  if (globalShortcut.register(settings.hotkey, () => summonLauncher())) {
     registeredHotkey = settings.hotkey;
     return;
   }
   if (settings.hotkey !== "Control+Space") {
-    if (globalShortcut.register("Control+Space", () => launcher && showLauncher(launcher))) {
+    if (globalShortcut.register("Control+Space", () => summonLauncher())) {
       registeredHotkey = "Control+Space";
     }
   }
+}
+
+/**
+ * Register both the launcher hotkey and the screenshot hotkey. registerHotkey
+ * calls unregisterAll first, so the screenshot shortcut must be (re)registered
+ * afterwards or it would be wiped whenever the launcher hotkey is refreshed.
+ */
+async function applyHotkeys(
+  settings: AppSettings,
+  helper: MouseHelper,
+  helperReady: boolean,
+): Promise<void> {
+  await registerHotkey(settings, helper, helperReady);
+  registeredScreenshotHotkey = screenshot
+    ? screenshot.registerHotkey(settings.screenshotHotkey)
+    : "";
 }
 
 async function createTray(): Promise<void> {
@@ -599,8 +1072,9 @@ async function createTray(): Promise<void> {
   tray.setToolTip("Dockwisp");
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: "打开 Dockwisp", click: () => launcher && showLauncher(launcher) },
-      { label: "设置", click: () => launcher && showLauncher(launcher, true) },
+      { label: "打开 Dockwisp", click: () => summonLauncher() },
+      { label: "截图", click: () => void screenshot?.open() },
+      { label: "设置", click: () => summonLauncher(true) },
       { type: "separator" },
       {
         label: "退出",
@@ -611,7 +1085,7 @@ async function createTray(): Promise<void> {
       },
     ]),
   );
-  tray.on("click", () => launcher && showLauncher(launcher));
+  tray.on("click", () => summonLauncher());
 }
 
 void app.whenReady().then(async () => {
@@ -621,7 +1095,9 @@ void app.whenReady().then(async () => {
   const captureSettingsPath = process.argv
     .find((item) => item.startsWith("--capture-settings="))
     ?.slice(19);
+  const systemIconsReady = warmSystemIcons();
   const settingsStore = new SettingsStore(app.getPath("userData"));
+  getLauncherPosition = () => settingsStore.get().launcherPosition ?? undefined;
   const userPluginRoot = path.join(app.getPath("userData"), "plugins");
   mkdirSync(userPluginRoot, { recursive: true });
   const fixtureRoot = path.join(process.cwd(), "fixtures", "plugins");
@@ -649,6 +1125,78 @@ void app.whenReady().then(async () => {
       event.preventDefault();
       launcher?.hide();
     }
+  });
+
+  // Persist the launcher position when the user drags it. Debounced so a drag
+  // emits one write, and filtered so the off-screen reveal position (-20000)
+  // and no-op moves never reach settings.
+  const persistLauncherPosition = (): void => {
+    if (!launcher || launcher.isDestroyed()) return;
+    const [x, y] = launcher.getPosition();
+    // The reveal animation parks the window at -20000; never store that.
+    if (x < -10_000 || y < -10_000) return;
+    const current = settingsStore.get().launcherPosition;
+    if (current && current.x === x && current.y === y) return;
+    settingsStore.update({ launcherPosition: { x, y } });
+  };
+  let launcherDragState: {
+    originX: number;
+    originY: number;
+    startX: number;
+    startY: number;
+  } | null = null;
+  let moveTimer: NodeJS.Timeout | null = null;
+  const schedulePositionSave = (): void => {
+    if (launcherDragState) return;
+    if (moveTimer) clearTimeout(moveTimer);
+    moveTimer = setTimeout(() => {
+      moveTimer = null;
+      // Ignore moves we initiated from show/resize/reset.
+      if (Date.now() < suppressLauncherPositionSaveUntil) return;
+      persistLauncherPosition();
+    }, 250);
+  };
+  // `move` fires while dragging on Windows; `moved` fires once on platforms
+  // that only provide the settled event. Debouncing makes both work.
+  launcher.on("move", schedulePositionSave);
+  launcher.on("moved", schedulePositionSave);
+
+  // Custom drag from the renderer: the search bar is a normal DOM element, so
+  // holding anywhere (except the settings icon) can move the window while the
+  // input still supports clicking/caret placement. Window positions use DIP,
+  // matching screen coordinates reported by pointer events.
+  ipcMain.on("launcher:drag-start", (event, x: unknown, y: unknown) => {
+    if (!launcher || launcher.isDestroyed() || event.sender !== launcher.webContents) return;
+    if (!settingsStore.get().windowDragEnabled) return;
+    if (typeof x !== "number" || typeof y !== "number") return;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const [originX, originY] = launcher.getPosition();
+    // Use the real cursor position (DIP) rather than relying on the renderer's
+    // CSS-pixel coordinates; this stays correct across mixed-DPI monitors.
+    const cursor = screen.getCursorScreenPoint();
+    launcherDragState = { originX, originY, startX: cursor.x, startY: cursor.y };
+    suppressLauncherPositionSaveUntil = 0;
+  });
+  ipcMain.on("launcher:drag-move", (event) => {
+    if (!launcher || launcher.isDestroyed() || !launcherDragState) return;
+    if (event.sender !== launcher.webContents) return;
+    const cursor = screen.getCursorScreenPoint();
+    launcher.setPosition(
+      Math.round(launcherDragState.originX + (cursor.x - launcherDragState.startX)),
+      Math.round(launcherDragState.originY + (cursor.y - launcherDragState.startY)),
+      false,
+    );
+  });
+  ipcMain.on("launcher:drag-end", (event) => {
+    if (!launcherDragState) return;
+    if (!launcher || launcher.isDestroyed() || event.sender !== launcher.webContents) return;
+    launcherDragState = null;
+    persistLauncherPosition();
+  });
+  launcher.on("hide", () => {
+    if (!launcherDragState) return;
+    launcherDragState = null;
+    persistLauncherPosition();
   });
 
   const helper = new MouseHelper(
@@ -680,7 +1228,7 @@ void app.whenReady().then(async () => {
       settingsStore.get().hotkey.replace(/\s/g, "").toLowerCase() ===
       "alt+space"
     ) {
-      showLauncher(launcher!);
+      summonLauncher();
       focusLauncher();
     }
   });
@@ -714,6 +1262,13 @@ void app.whenReady().then(async () => {
       return [...roots];
     },
   );
+
+  // Warm up the Everything provider shortly after startup so the first file
+  // search does not pay the spawn/index latency. Skip in test/capture modes to
+  // avoid launching Everything in automated environments.
+  if (!smokeTest && !captureUiPath && !captureSettingsPath) {
+    setTimeout(() => fileSearch.warmUp(), 1_200);
+  }
 
   const rememberMatches = (matches: SearchMatch[]): void => {
     lastMatches.clear();
@@ -813,6 +1368,7 @@ void app.whenReady().then(async () => {
         stdio: "ignore",
         windowsHide: true,
       });
+      child.on("error", () => undefined);
       child.unref();
     } catch {
       // Best-effort: a missing system binary should not crash the launcher.
@@ -820,6 +1376,27 @@ void app.whenReady().then(async () => {
   };
 
   const runSystemCommand = async (commandId: string): Promise<void> => {
+    // Data-driven system tools (control panel pages, .msc consoles, settings
+    // URIs) share one launch path; special actions keep their explicit cases.
+    const definition = SYSTEM_COMMANDS.find((command) => command.id === commandId);
+    if (definition?.run) {
+      const run = definition.run;
+      try {
+        if (run.type === "uri") {
+          await shell.openExternal(run.target);
+        } else if (run.type === "path") {
+          const error = await shell.openPath(run.target);
+          if (error) throw new Error(error);
+        } else {
+          spawnDetached(run.target, run.args ?? []);
+        }
+        launcher?.hide();
+      } catch {
+        // A missing optional component (for example Windows Terminal on an
+        // older install) should not crash; the launcher simply stays open.
+      }
+      return;
+    }
     switch (commandId) {
       case "lock":
         spawnDetached("rundll32.exe", ["user32.dll,LockWorkStation"]);
@@ -881,7 +1458,46 @@ void app.whenReady().then(async () => {
     }
   };
 
+  const screenshotController = new ScreenshotController(launcher, settingsStore, helper);
+  screenshot = screenshotController;
+  const previewController = new PreviewController(settingsStore, () => {
+    // Closing a preview returns to the existing file results instead of
+    // leaving the launcher hidden. The renderer keeps its result list, so a
+    // focus event restores the exact previous view.
+    if (!quitting) summonLauncher();
+  });
+
+  ipcMain.on("screenshot:start", (event) => {
+    if (!launcher || event.sender !== launcher.webContents) return;
+    void screenshotController.open();
+  });
+
+  ipcMain.handle("plugins:list", () => {
+    const installed = registry.list().map((plugin) => ({
+      id: plugin.id,
+      name: plugin.manifest.pluginName,
+      description: pluginDescription(plugin),
+      version: plugin.manifest.version,
+      featureCount: plugin.manifest.features.length,
+      builtin: false,
+      iconUrl: pluginIconUrl(plugin),
+    }));
+    return [
+      {
+        id: "builtin:screenshot",
+        name: "截图 OCR",
+        description: "区域截图、标注、OCR 与翻译，按 Enter 复制并关闭",
+        version: "内置",
+        featureCount: 1,
+        builtin: true,
+        iconUrl: SCREENSHOT_ICON_URL,
+      },
+      ...installed,
+    ];
+  });
+
   ipcMain.handle("launcher:search", async (_event, rawInput: unknown) => {
+    await systemIconsReady;
     const input = normalizeInput(rawInput);
     // File-search mode: text prefixed with "文件 " or "file ".
     if (input.type === "text") {
@@ -1013,6 +1629,11 @@ void app.whenReady().then(async () => {
       if (match.action === "window-search") {
         return { action: "window-search", query: "" };
       }
+      if (match.action === "screenshot") {
+        launcher?.hide();
+        void screenshotController.open();
+        return { ok: true, hide: true };
+      }
       if (match.action === "focus-window") {
         launcher?.hide();
         await new Promise((resolve) => setTimeout(resolve, 80));
@@ -1028,7 +1649,11 @@ void app.whenReady().then(async () => {
         return true;
       }
       if (match.action === "settings") {
-        launcher?.webContents.send("launcher:open-settings");
+        launcher?.webContents.send("launcher:open-settings", "settings");
+        return true;
+      }
+      if (match.action === "plugins") {
+        launcher?.webContents.send("launcher:open-settings", "plugins");
         return true;
       }
       const text = match.payload || clipboard.readText();
@@ -1064,7 +1689,7 @@ void app.whenReady().then(async () => {
     async (
       _event,
       id: string,
-      action: "open" | "reveal" | "copy-path" | "copy-name" | "run-as-admin",
+      action: "open" | "reveal" | "copy-path" | "copy-name" | "run-as-admin" | "preview",
     ): Promise<{ ok: boolean; message?: string; hide?: boolean }> => {
       const match = lastMatches.get(id);
       if (!match || (match.kind !== "app" && match.kind !== "file")) {
@@ -1073,6 +1698,15 @@ void app.whenReady().then(async () => {
       const original = match.path;
       const resolved = resolveTarget(original);
       try {
+        if (action === "preview") {
+          if (match.kind !== "file") {
+            return { ok: false, message: "仅支持预览文件" };
+          }
+          const result = await previewController.open(original);
+          if (!result.ok) return result;
+          launcher?.hide();
+          return { ok: true, hide: true };
+        }
         if (action === "open") {
           const error = await shell.openPath(original);
           if (error) {
@@ -1117,17 +1751,83 @@ void app.whenReady().then(async () => {
     },
   );
 
-  ipcMain.on("launcher:resize", (_event, height: unknown) => {
+  let compactBoundsBeforeHub: { x: number; y: number } | null = null;
+  let boundsAnimation: NodeJS.Timeout | null = null;
+  ipcMain.on("launcher:resize", (_event, height: unknown, widthValue: unknown) => {
     if (!launcher || launcher.isDestroyed()) return;
     const numeric = typeof height === "number" && Number.isFinite(height) ? height : 0;
-    const clamped = Math.round(Math.min(640, Math.max(64, numeric)));
+    const clamped = Math.round(Math.min(700, Math.max(64, numeric)));
     const bounds = launcher.getBounds();
-    const width = 780;
+    const width =
+      typeof widthValue === "number" && Number.isFinite(widthValue)
+        ? Math.round(Math.min(1_200, Math.max(LAUNCHER_WIDTH, widthValue)))
+        : LAUNCHER_WIDTH;
+    // Resizing can clamp Y; do not treat that as a user drag.
+    suppressLauncherPositionSaveUntil = Date.now() + 600;
+    const openingHub = width > bounds.width && bounds.width === LAUNCHER_WIDTH;
+    const closingHub = width === LAUNCHER_WIDTH && bounds.width > LAUNCHER_WIDTH;
+    if (openingHub) {
+      compactBoundsBeforeHub = { x: bounds.x, y: bounds.y };
+    }
+
     // Keep the whole window inside the work area: the top is pinned near 18% of
     // the display, so a tall window would otherwise overflow the bottom edge.
     const { workArea } = screen.getDisplayMatching(bounds);
-    const y = Math.max(workArea.y, Math.min(bounds.y, workArea.y + workArea.height - clamped));
-    launcher.setBounds({ x: bounds.x, y, width, height: clamped });
+    // Width changes (compact search bar <-> hub) grow/shrink from the center so
+    // the window does not appear to jump to the right. On close, return to the
+    // exact compact position saved before the hub opened.
+    const centerX = bounds.x + bounds.width / 2;
+    let desiredX =
+      width === bounds.width ? bounds.x : Math.round(centerX - width / 2);
+    let desiredY = bounds.y;
+    if (closingHub && compactBoundsBeforeHub) {
+      desiredX = compactBoundsBeforeHub.x;
+      desiredY = compactBoundsBeforeHub.y;
+      // Keep the saved compact position until the shrink animation completes;
+      // runSearch may issue a second resize while it is still running.
+    }
+    const x = Math.max(
+      workArea.x,
+      Math.min(desiredX, workArea.x + workArea.width - width),
+    );
+    const y = Math.max(workArea.y, Math.min(desiredY, workArea.y + workArea.height - clamped));
+    const target = { x, y, width, height: clamped };
+
+    // Opening/closing the hub changes both width and height. Animate that one
+    // transition so the compact search bar and the wide hub feel connected;
+    // normal result-height changes stay immediate.
+    if (boundsAnimation) {
+      clearInterval(boundsAnimation);
+      boundsAnimation = null;
+    }
+    if (bounds.width !== width) {
+      const start = { ...bounds };
+      const started = Date.now();
+      const duration = 190;
+      suppressLauncherPositionSaveUntil = Date.now() + duration + 450;
+      boundsAnimation = setInterval(() => {
+        if (!launcher || launcher.isDestroyed()) {
+          if (boundsAnimation) clearInterval(boundsAnimation);
+          boundsAnimation = null;
+          return;
+        }
+        const progress = Math.min(1, (Date.now() - started) / duration);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        launcher.setBounds({
+          x: Math.round(start.x + (target.x - start.x) * eased),
+          y: Math.round(start.y + (target.y - start.y) * eased),
+          width: Math.round(start.width + (target.width - start.width) * eased),
+          height: Math.round(start.height + (target.height - start.height) * eased),
+        });
+        if (progress >= 1) {
+          if (boundsAnimation) clearInterval(boundsAnimation);
+          boundsAnimation = null;
+          if (target.width === LAUNCHER_WIDTH) compactBoundsBeforeHub = null;
+        }
+      }, 16);
+    } else {
+      launcher.setBounds(target);
+    }
   });
 
   ipcMain.handle("launcher:add-paths", async (_event, rawPaths: unknown) => {
@@ -1212,9 +1912,21 @@ void app.whenReady().then(async () => {
   });
 
   ipcMain.on("launcher:hide", () => launcher?.hide());
+  ipcMain.handle("launcher:reset-position", () => {
+    settingsStore.update({ launcherPosition: null });
+    if (launcher && !launcher.isDestroyed()) {
+      const [width, height] = launcher.getSize();
+      const { x, y } = defaultLauncherPosition(width, height);
+      suppressLauncherPositionSaveUntil = Date.now() + 450;
+      launcher.setPosition(x, y, false);
+    }
+    return { ok: true };
+  });
   ipcMain.handle("settings:get", () => ({
     ...settingsStore.get(),
+    appVersion: app.getVersion(),
     registeredHotkey,
+    registeredScreenshotHotkey,
     pluginErrors: registry.getErrors(),
     inputHelperReady: helperReady,
     translationDiagnostics: translation.getDiagnostics(),
@@ -1222,11 +1934,14 @@ void app.whenReady().then(async () => {
   ipcMain.handle("settings:update", async (_event, patch: Partial<AppSettings>) => {
     const previous = settingsStore.get();
     const next = settingsStore.update(patch ?? {});
-    if (previous.hotkey !== next.hotkey) {
-      await registerHotkey(next, helper, helperReady);
+    if (
+      previous.hotkey !== next.hotkey ||
+      previous.screenshotHotkey !== next.screenshotHotkey
+    ) {
+      await applyHotkeys(next, helper, helperReady);
     }
     if (previous.launchAtLogin !== next.launchAtLogin) applyLoginSetting(next);
-    return { ...next, registeredHotkey };
+    return { ...next, registeredHotkey, registeredScreenshotHotkey };
   });
   ipcMain.handle("launcher:add-plugin-directory", async () => {
     const result = await dialog.showOpenDialog(launcher!, {
@@ -1291,7 +2006,7 @@ void app.whenReady().then(async () => {
         launcher?.webContents.once("did-finish-load", () => resolve()),
       );
     }
-    showLauncher(launcher);
+    summonLauncher();
     await new Promise((resolve) => setTimeout(resolve, 180));
     if (captureUiPath) {
       writeFileSync(captureUiPath, (await launcher.webContents.capturePage()).toPNG());
@@ -1333,14 +2048,19 @@ void app.whenReady().then(async () => {
   }
 
   applyLoginSetting(settingsStore.get());
-  await registerHotkey(settingsStore.get(), helper, helperReady);
+  await applyHotkeys(settingsStore.get(), helper, helperReady);
   await createTray();
-  if (devMode) showLauncher(launcher);
+  if (devMode) summonLauncher();
 
-  app.on("second-instance", () => launcher && showLauncher(launcher));
-  app.on("activate", () => launcher && showLauncher(launcher));
+  app.on("second-instance", () => summonLauncher());
+  app.on("activate", () => summonLauncher());
   app.on("before-quit", () => {
     quitting = true;
+    if (boundsAnimation) {
+      clearInterval(boundsAnimation);
+      boundsAnimation = null;
+    }
+    if (Date.now() >= suppressLauncherPositionSaveUntil) persistLauncherPosition();
     usage.flush();
     helper.stop();
     globalShortcut.unregisterAll();

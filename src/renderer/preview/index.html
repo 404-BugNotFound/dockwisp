@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; media-src data:; frame-src data:; style-src 'self'; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>预览</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <img id="fileIcon" class="file-icon" alt="" hidden />
+      <span id="fileIconFallback" class="file-icon fallback" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+      </span>
+      <div class="heading">
+        <div id="fileName" class="file-name">正在载入…</div>
+        <div id="filePath" class="file-path"></div>
+      </div>
+      <div class="actions">
+        <button id="openFile" class="soft-button" type="button">打开</button>
+        <button id="revealFile" class="soft-button" type="button">位置</button>
+        <button id="copyPath" class="soft-button" type="button">复制路径</button>
+        <button id="closeWindow" class="icon-button" type="button" aria-label="关闭" title="关闭 (Esc)">
+          <svg viewBox="0 0 24 24"><path d="M6 6 L18 18 M18 6 L6 18"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main id="stage" class="stage">
+      <div id="loading" class="loading">
+        <span class="spinner"></span>
+        <span>正在载入预览…</span>
+      </div>
+      <div id="content" class="content" hidden></div>
+    </main>
+
+    <footer class="statusbar">
+      <span id="meta"></span>
+      <span class="hint">Esc 关闭预览</span>
+    </footer>
+
+    <div id="toast" class="toast" hidden></div>
+  </body>
+</html>

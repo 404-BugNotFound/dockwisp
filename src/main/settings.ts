@@ -12,6 +12,7 @@ export type ThemePreference = "system" | "light" | "dark";
 
 export interface AppSettings {
   hotkey: string;
+  screenshotHotkey: string;
   launchAtLogin: boolean;
   longPressMs: number;
   translationEnabled: boolean;
@@ -21,10 +22,14 @@ export interface AppSettings {
   customLaunchItems: string[];
   pinnedMatches: PinnedMatch[];
   theme: ThemePreference;
+  launcherPosition: { x: number; y: number } | null;
+  windowDragEnabled: boolean;
+  panelTransparency: number;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
   hotkey: "Alt+Space",
+  screenshotHotkey: "Alt+Shift+S",
   launchAtLogin: false,
   longPressMs: 550,
   translationEnabled: true,
@@ -38,6 +43,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   customLaunchItems: [],
   pinnedMatches: [],
   theme: "system",
+  launcherPosition: null,
+  windowDragEnabled: true,
+  panelTransparency: 12,
 };
 
 const THEME_VALUES = new Set<ThemePreference>(["system", "light", "dark"]);
@@ -82,6 +90,18 @@ function normalizePinnedMatches(value: unknown): PinnedMatch[] {
   return result;
 }
 
+const POSITION_LIMIT = 100_000;
+
+/** Accept only a pair of finite, bounded integers; anything else becomes null. */
+function normalizeLauncherPosition(value: unknown): { x: number; y: number } | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as { x?: unknown; y?: unknown };
+  if (typeof raw.x !== "number" || typeof raw.y !== "number") return null;
+  if (!Number.isFinite(raw.x) || !Number.isFinite(raw.y)) return null;
+  if (Math.abs(raw.x) > POSITION_LIMIT || Math.abs(raw.y) > POSITION_LIMIT) return null;
+  return { x: Math.round(raw.x), y: Math.round(raw.y) };
+}
+
 function normalizeSettings(value: Partial<AppSettings>): AppSettings {
   const translation = value.translation ?? DEFAULT_SETTINGS.translation;
   return {
@@ -89,6 +109,10 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
       typeof value.hotkey === "string" && value.hotkey.trim()
         ? value.hotkey.trim()
         : DEFAULT_SETTINGS.hotkey,
+    screenshotHotkey:
+      typeof value.screenshotHotkey === "string" && value.screenshotHotkey.trim()
+        ? value.screenshotHotkey.trim()
+        : DEFAULT_SETTINGS.screenshotHotkey,
     launchAtLogin: value.launchAtLogin === true,
     longPressMs:
       typeof value.longPressMs === "number"
@@ -118,6 +142,12 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
       typeof value.theme === "string" && THEME_VALUES.has(value.theme as ThemePreference)
         ? (value.theme as ThemePreference)
         : DEFAULT_SETTINGS.theme,
+    launcherPosition: normalizeLauncherPosition(value.launcherPosition),
+    windowDragEnabled: value.windowDragEnabled !== false,
+    panelTransparency:
+      typeof value.panelTransparency === "number" && Number.isFinite(value.panelTransparency)
+        ? Math.min(40, Math.max(0, Math.round(value.panelTransparency)))
+        : DEFAULT_SETTINGS.panelTransparency,
   };
 }
 

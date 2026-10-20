@@ -53,6 +53,20 @@ export class FileSearch {
     this.fallbackIndex = null;
   }
 
+  /**
+   * Start the preferred Everything provider ahead of the first query so the
+   * initial file search does not pay the spawn/index latency. Best-effort and
+   * non-blocking: any failure is swallowed and the normal lazy start still
+   * applies on the first query.
+   */
+  warmUp(): void {
+    try {
+      this.startProvider();
+    } catch {
+      // Ignore: the first query will retry via the normal path.
+    }
+  }
+
   static resolveExecutable(isPackaged: boolean, resourcesPath: string): string {
     return isPackaged
       ? path.join(resourcesPath, "native", "everything-search.exe")

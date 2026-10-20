@@ -20,13 +20,12 @@
 }
 * { box-sizing: border-box; }
 html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; color: var(--text); }
-body { padding: 10px; }
+body { padding: 0; }
 button { font: inherit; color: inherit; }
 .translation-card {
   width: 100%; height: 100%; display: grid; grid-template-rows: auto 1fr auto;
   overflow: hidden; border: 1px solid rgba(255,255,255,.35); border-radius: 19px;
   background: var(--surface); backdrop-filter: blur(26px) saturate(130%);
-  box-shadow: 0 20px 52px rgba(24,21,48,.3), 0 3px 13px rgba(24,21,48,.14);
 }
 header, footer { display: flex; align-items: center; gap: 9px; padding: 10px 12px; }
 header { border-bottom: 1px solid var(--line); -webkit-app-region: drag; }
@@ -42,6 +41,7 @@ header strong { font-size: 12px; }
 .spacer { flex: 1; }
 button { border: 0; border-radius: 9px; padding: 5px 10px; background: var(--surface-2); cursor: pointer; font-size: 10px; }
 button:hover { background: rgba(108,92,231,.14); }
+#pin.active { color: #fff; background: linear-gradient(135deg, #8d7cf8, #6652df); }
 .icon-button { width: 28px; height: 28px; padding: 0; font-size: 17px; background: transparent; color: var(--muted); }
 main { padding: 11px 14px 6px; overflow-y: auto; }
 #source {

@@ -16,3 +16,9 @@ native/portable/Everything.lng
 *.blockmap
 *.log
 .env
+.openchamber/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.tsbuildinfo

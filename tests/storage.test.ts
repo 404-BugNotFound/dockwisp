@@ -30,14 +30,35 @@ test("normalizes and rewrites settings", () => {
   assert.equal(reopened.longPressMs, 3_000);
 });
 
-test("persists and normalizes theme preference", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "dockwisp-theme-"));
+test("persists and normalizes theme preference", () => {  const root = mkdtempSync(path.join(os.tmpdir(), "dockwisp-theme-"));
   const settings = new SettingsStore(root);
   assert.equal(settings.get().theme, "system");
   settings.update({ theme: "dark" });
   assert.equal(new SettingsStore(root).get().theme, "dark");
   settings.update({ theme: "neon" as never });
   assert.equal(new SettingsStore(root).get().theme, "system");
+});
+
+test("defaults window dragging on and persists disabling it", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "dockwisp-drag-"));
+  const settings = new SettingsStore(root);
+  assert.equal(settings.get().windowDragEnabled, true);
+  settings.update({ windowDragEnabled: false });
+  assert.equal(new SettingsStore(root).get().windowDragEnabled, false);
+  settings.update({ windowDragEnabled: true });
+  assert.equal(new SettingsStore(root).get().windowDragEnabled, true);
+});
+
+test("defaults and clamps panel transparency", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "dockwisp-opacity-"));
+  const settings = new SettingsStore(root);
+  assert.equal(settings.get().panelTransparency, 12);
+  settings.update({ panelTransparency: 28.6 });
+  assert.equal(new SettingsStore(root).get().panelTransparency, 29);
+  settings.update({ panelTransparency: 99 });
+  assert.equal(new SettingsStore(root).get().panelTransparency, 40);
+  settings.update({ panelTransparency: -5 });
+  assert.equal(new SettingsStore(root).get().panelTransparency, 0);
 });
 
 test("persists, dedupes and caps pinned matches", () => {
@@ -76,4 +97,32 @@ test("persists, dedupes and caps pinned matches", () => {
   }));
   settings.update({ pinnedMatches: many });
   assert.equal(new SettingsStore(root).get().pinnedMatches.length, 50);
+});
+
+test("defaults and normalizes screenshot hotkey", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "dockwisp-shot-"));
+  const settings = new SettingsStore(root);
+  assert.equal(settings.get().screenshotHotkey, "Alt+Shift+S");
+  settings.update({ screenshotHotkey: "Ctrl+Alt+A" });
+  assert.equal(new SettingsStore(root).get().screenshotHotkey, "Ctrl+Alt+A");
+  settings.update({ screenshotHotkey: "   " });
+  assert.equal(new SettingsStore(root).get().screenshotHotkey, "Alt+Shift+S");
+  settings.update({ screenshotHotkey: 123 as never });
+  assert.equal(new SettingsStore(root).get().screenshotHotkey, "Alt+Shift+S");
+});
+
+test("persists valid launcher position and rejects invalid", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "dockwisp-pos-"));
+  const settings = new SettingsStore(root);
+  assert.equal(settings.get().launcherPosition, null);
+  settings.update({ launcherPosition: { x: 240, y: 180 } });
+  assert.deepEqual(new SettingsStore(root).get().launcherPosition, { x: 240, y: 180 });
+  settings.update({ launcherPosition: { x: 10.7, y: -5.2 } });
+  assert.deepEqual(new SettingsStore(root).get().launcherPosition, { x: 11, y: -5 });
+  settings.update({ launcherPosition: { x: 999999, y: 0 } });
+  assert.equal(new SettingsStore(root).get().launcherPosition, null);
+  settings.update({ launcherPosition: { x: Number.NaN, y: 0 } as never });
+  assert.equal(new SettingsStore(root).get().launcherPosition, null);
+  settings.update({ launcherPosition: "nope" as never });
+  assert.equal(new SettingsStore(root).get().launcherPosition, null);
 });

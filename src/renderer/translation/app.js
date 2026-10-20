@@ -10,6 +10,8 @@ let pinned = false;
 api.onState((state) => {
   pinned = state.pinned === true;
   pin.textContent = pinned ? "取消固定" : "固定";
+  pin.classList.toggle("active", pinned);
+  pin.title = pinned ? "取消固定：失焦后自动关闭" : "固定：点击其他界面后保持显示";
   source.textContent = state.sourceText || "";
   error.textContent = "";
   copy.disabled = state.status !== "success";
