@@ -264,6 +264,11 @@ interface SystemCommand {
   title: string;
   subtitle: string;
   keywords: string[];
+  /**
+   * Start Menu app names that launch the same tool. When this command is shown,
+   * indexed apps with these names are hidden so the tool is not listed twice.
+   */
+  aliases?: string[];
   iconSource?: string;
   run?:
     | { type: "exe"; target: string; args?: string[] }
@@ -383,6 +388,7 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
     title: "资源管理器",
     subtitle: "打开文件资源管理器",
     keywords: ["资源管理器", "explorer"],
+    aliases: ["文件资源管理器", "File Explorer"],
     iconSource: system32("explorer.exe"),
   },
   {
@@ -404,6 +410,7 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
     title: "终端（命令提示符）",
     subtitle: "打开命令提示符终端",
     keywords: ["终端", "命令提示符", "cmd", "terminal"],
+    aliases: ["命令提示符", "Command Prompt"],
     run: { type: "exe", target: system32("cmd.exe") },
   },
   {
@@ -411,6 +418,7 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
     title: "PowerShell",
     subtitle: "打开 Windows PowerShell",
     keywords: ["powershell", "ps", "命令行"],
+    aliases: ["Windows PowerShell"],
     run: {
       type: "exe",
       target: path.join(
@@ -427,6 +435,7 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
     title: "Windows 终端",
     subtitle: "打开 Windows Terminal",
     keywords: ["windows terminal", "wt", "终端"],
+    aliases: ["终端", "Terminal", "Windows Terminal"],
     run: { type: "exe", target: "wt.exe" },
   },
   {
@@ -1935,12 +1944,15 @@ void app.whenReady().then(async () => {
     const tools = await toolMatches(input, currency);
     const builtins = builtinMatches(input);
     // A built-in system command (for example 资源监视器) supersedes an indexed
-    // Start Menu app of the same name, so the tool is not listed twice.
-    const systemTitles = new Set(
-      builtins
-        .filter((match) => match.action === "system")
-        .map((match) => match.title.trim().toLowerCase()),
-    );
+    // Start Menu app of the same name or a known alias (文件资源管理器 for
+    // 资源管理器), so the tool is not listed twice.
+    const systemTitles = new Set<string>();
+    for (const match of builtins) {
+      if (match.action !== "system") continue;
+      systemTitles.add(match.title.trim().toLowerCase());
+      const definition = SYSTEM_COMMANDS.find((command) => command.id === match.payload);
+      for (const alias of definition?.aliases ?? []) systemTitles.add(alias.toLowerCase());
+    }
     const visibleApps = appMatches.filter(
       (match) => !systemTitles.has(match.title.trim().toLowerCase()),
     );
