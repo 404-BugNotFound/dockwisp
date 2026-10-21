@@ -680,9 +680,12 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
 
 /** Score a system command against the query; -1 when it does not match. */
 function scoreSystemCommand(command: SystemCommand, query: string, lower: string): number {
+  // Aliases are the Start Menu names of the same tool, so they match too: the
+  // alias app is hidden in favour of this command, which must then still show.
+  const terms = [...command.keywords, ...(command.aliases ?? [])];
   if (command.title === query) return 1_300;
-  if (command.keywords.some((keyword) => keyword.toLowerCase() === lower)) return 1_250;
-  const keywordMatches = command.keywords.some((keyword) => {
+  if (terms.some((keyword) => keyword.toLowerCase() === lower)) return 1_250;
+  const keywordMatches = terms.some((keyword) => {
     const normalized = keyword.toLowerCase();
     // Chinese keywords can match anywhere; ASCII keywords only at the start so
     // e.g. "block" does not surface the lock-screen command.
@@ -696,24 +699,36 @@ function scoreSystemCommand(command: SystemCommand, query: string, lower: string
   return -1;
 }
 
+function systemMatch(command: SystemCommand, score: number): BuiltinMatch {
+  return {
+    id: `system:${command.id}`,
+    kind: "builtin" as const,
+    action: "system" as const,
+    title: command.title,
+    subtitle: command.subtitle,
+    score,
+    payload: command.id,
+    iconUrl:
+      systemIconCache.get(command.id) ??
+      SYSTEM_ICON_URLS[command.id] ??
+      SYSTEM_ICON_FALLBACK,
+  };
+}
+
+/** The system command a Start Menu app name is an alias of, if any. */
+function systemCommandForAlias(name: string): SystemCommand | undefined {
+  const lower = name.trim().toLowerCase();
+  return SYSTEM_COMMANDS.find((command) =>
+    command.aliases?.some((alias) => alias.toLowerCase() === lower),
+  );
+}
+
 function systemMatches(query: string, lower: string): BuiltinMatch[] {
   return SYSTEM_COMMANDS.map((command) => ({ command, score: scoreSystemCommand(command, query, lower) }))
     .filter(({ score }) => score >= 0)
     .sort((left, right) => right.score - left.score)
     .slice(0, 3)
-    .map(({ command, score }) => ({
-      id: `system:${command.id}`,
-      kind: "builtin" as const,
-      action: "system" as const,
-      title: command.title,
-      subtitle: command.subtitle,
-      score,
-      payload: command.id,
-      iconUrl:
-        systemIconCache.get(command.id) ??
-        SYSTEM_ICON_URLS[command.id] ??
-        SYSTEM_ICON_FALLBACK,
-    }));
+    .map(({ command, score }) => systemMatch(command, score));
 }
 
 function builtinMatches(input: SearchInput): BuiltinMatch[] {
@@ -1945,17 +1960,31 @@ void app.whenReady().then(async () => {
     const builtins = builtinMatches(input);
     // A built-in system command (for example 资源监视器) supersedes an indexed
     // Start Menu app of the same name or a known alias (文件资源管理器 for
-    // 资源管理器), so the tool is not listed twice.
+    // 资源管理器), so the tool is listed once, with the built-in icon and
+    // launcher. An alias app matched by a query the command itself misses (for
+    // example pinyin initials) is replaced by the command.
     const systemTitles = new Set<string>();
+    const shownSystemIds = new Set<string>();
     for (const match of builtins) {
       if (match.action !== "system") continue;
+      shownSystemIds.add(match.payload ?? "");
       systemTitles.add(match.title.trim().toLowerCase());
       const definition = SYSTEM_COMMANDS.find((command) => command.id === match.payload);
       for (const alias of definition?.aliases ?? []) systemTitles.add(alias.toLowerCase());
     }
-    const visibleApps = appMatches.filter(
-      (match) => !systemTitles.has(match.title.trim().toLowerCase()),
-    );
+    const visibleApps: AppMatch[] = [];
+    for (const match of appMatches) {
+      if (systemTitles.has(match.title.trim().toLowerCase())) continue;
+      const command = systemCommandForAlias(match.title);
+      if (command) {
+        if (!shownSystemIds.has(command.id)) {
+          shownSystemIds.add(command.id);
+          builtins.push(systemMatch(command, match.score));
+        }
+        continue;
+      }
+      visibleApps.push(match);
+    }
     const merged = mergeMatches(
       [tools, builtins, pluginMatches, visibleApps],
       36,
