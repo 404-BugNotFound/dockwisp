@@ -303,6 +303,13 @@ LRESULT CALLBACK mouse_proc(int code, WPARAM event, LPARAM data) {
            << info->time << ",\"process\":\"" << json_escape(process_path)
            << "\",\"title\":\"" << json_escape(title) << "\"}";
     emit(stream.str());
+  } else if (code == HC_ACTION && (event == WM_LBUTTONDOWN || event == WM_RBUTTONDOWN)) {
+    // Lets the translation popup close when the user clicks anywhere outside it,
+    // even though the popup is shown without taking focus.
+    const auto* info = reinterpret_cast<MSLLHOOKSTRUCT*>(data);
+    std::ostringstream stream;
+    stream << "{\"type\":\"click\",\"x\":" << info->pt.x << ",\"y\":" << info->pt.y << "}";
+    emit(stream.str());
   }
   return CallNextHookEx(mouse_hook, code, event, data);
 }

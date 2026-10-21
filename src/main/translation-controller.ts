@@ -38,7 +38,6 @@ export class TranslationController {
   private longPressTimer: NodeJS.Timeout | null = null;
   private thresholdReached = false;
   private directSelectionPromise: Promise<boolean> | null = null;
-  private autoHideTimer: NodeJS.Timeout | null = null;
   private running = false;
   private pinned = false;
   private lastResult: TranslationResult | null = null;
@@ -55,6 +54,7 @@ export class TranslationController {
     private readonly settings: SettingsStore,
   ) {
     helper.on("mouse", (event: MiddleMouseEvent) => this.onMouse(event));
+    helper.on("click", (event: { x: number; y: number }) => this.onOutsideClick(event));
     ipcMain.on("translation:close", () => {
       this.pinned = false;
       this.hide();
@@ -64,13 +64,6 @@ export class TranslationController {
     });
     ipcMain.on("translation:pin", (_event, pinned: boolean) => {
       this.pinned = pinned === true;
-      if (this.pinned) {
-        if (this.autoHideTimer) clearTimeout(this.autoHideTimer);
-        this.autoHideTimer = null;
-      } else if (this.window && !this.window.isDestroyed() && this.window.isVisible()) {
-        if (this.autoHideTimer) clearTimeout(this.autoHideTimer);
-        this.autoHideTimer = setTimeout(() => this.hide(), 14_000);
-      }
       if (this.window && !this.window.isDestroyed()) {
         this.window.setAlwaysOnTop(true, this.pinned ? "pop-up-menu" : "floating");
       }
@@ -84,6 +77,21 @@ export class TranslationController {
 
   getDiagnostics(): typeof this.diagnostics {
     return { ...this.diagnostics };
+  }
+
+  private onOutsideClick(rawPoint: { x: number; y: number }): void {
+    if (this.pinned || !this.window || this.window.isDestroyed() || !this.window.isVisible()) {
+      return;
+    }
+    const point =
+      process.platform === "win32" ? screen.screenToDipPoint(rawPoint) : rawPoint;
+    const bounds = this.window.getBounds();
+    const inside =
+      point.x >= bounds.x &&
+      point.x < bounds.x + bounds.width &&
+      point.y >= bounds.y &&
+      point.y < bounds.y + bounds.height;
+    if (!inside) this.hide();
   }
 
   private onMouse(rawEvent: MiddleMouseEvent): void {
@@ -358,10 +366,6 @@ export class TranslationController {
     // and hiding the popup. Once the user clicks the popup it receives focus,
     // so the existing blur-to-close behaviour still applies from then on.
     window.showInactive();
-    if (this.autoHideTimer) clearTimeout(this.autoHideTimer);
-    if (!this.pinned) {
-      this.autoHideTimer = setTimeout(() => this.hide(), 14_000);
-    }
   }
 
   private currentState(): TranslationViewState {
@@ -377,8 +381,6 @@ export class TranslationController {
   }
 
   private hide(): void {
-    if (this.autoHideTimer) clearTimeout(this.autoHideTimer);
-    this.autoHideTimer = null;
     if (this.window && !this.window.isDestroyed()) this.window.hide();
   }
 }
