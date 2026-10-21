@@ -44,6 +44,7 @@ import {
   SearchMatch,
 } from "../core/types";
 import { buildApplicationIndex } from "./app-index";
+import { hasPeIcon, loadPeIcon } from "./exe-icon";
 import { englishTranslateScore, matchBuiltinFeatures } from "../core/builtin-features";
 import { TranslateWindowController } from "./translate-window-controller";
 import { isShellAppPath } from "../core/start-apps";
@@ -1016,16 +1017,24 @@ async function appIconUrl(filePath: string): Promise<string | undefined> {
     // Shell shortcut icons are often the generic .lnk page + arrow. Resolve the
     // target (or the shortcut's explicit icon) so the result shows the app icon.
     let iconSource = filePath;
+    let iconIndex = 0;
     if (path.extname(filePath).toLowerCase() === ".lnk") {
       try {
         const shortcut = shell.readShortcutLink(filePath);
-        const candidate = shortcut.icon || shortcut.target;
-        if (candidate && existsSync(candidate)) iconSource = candidate;
+        if (shortcut.icon && existsSync(shortcut.icon)) {
+          iconSource = shortcut.icon;
+          iconIndex = shortcut.iconIndex ?? 0;
+        } else if (shortcut.target && existsSync(shortcut.target)) {
+          iconSource = shortcut.target;
+        }
       } catch {
         // Keep the shortcut icon if the link cannot be read.
       }
     }
-    const image = await app.getFileIcon(iconSource, { size: "large" });
+    // The shell returns the generic program icon for many executables (large
+    // Electron apps among them); read the embedded icon resource first.
+    const embedded = hasPeIcon(iconSource) ? loadPeIcon(iconSource, iconIndex) : undefined;
+    const image = embedded ?? (await app.getFileIcon(iconSource, { size: "large" }));
     const url = image.toDataURL();
     iconCache.set(filePath, url);
     return url;
