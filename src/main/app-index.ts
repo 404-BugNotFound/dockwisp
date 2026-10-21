@@ -7,6 +7,7 @@ import { buildSearchForms } from "../core/matcher";
 import {
   isShellAppPath,
   isUwpAppId,
+  linkIdentity,
   resolveKnownFolderPath,
 } from "../core/start-apps";
 import { AppEntry } from "../core/types";
@@ -100,40 +101,39 @@ function resolvedAppKey(entry: AppEntry): string {
 }
 
 /**
- * The resolved target of a scanned entry, for matching against KnownFolder
- * executables. .lnk shortcuts resolve to their target; other files resolve to
- * themselves. Shell paths have no filesystem target.
- */
-function scannedTargetKey(entry: AppEntry): string | null {
-  if (isShellAppPath(entry.path)) return null;
-  if (path.extname(entry.path).toLowerCase() === ".lnk") {
-    try {
-      const target = shell.readShortcutLink(entry.path).target;
-      if (target) return path.resolve(target).toLowerCase();
-    } catch {
-      return null;
-    }
-    return null;
-  }
-  return path.resolve(entry.path).toLowerCase();
-}
-
-/**
  * Merge the resolved Start Menu app list into the index, skipping entries a
  * .lnk/.exe scan already covers (by display name or shared target path) and
- * collapsing duplicate Start App names against one another.
+ * collapsing duplicate Start App names against one another. An auto-generated
+ * Start App that launches the same target and arguments as a scanned shortcut
+ * replaces that shortcut (unless it is pinned): it carries the localized
+ * display name and launches through the shell, which works for shortcuts that
+ * ShellExecute on the raw .lnk does not start.
  */
 function mergeStartApps(
   startApps: ResolvedStartApp[],
   result: Map<string, AppEntry>,
+  pinned: Set<string>,
 ): void {
   if (startApps.length === 0) return;
   const existingNames = new Set<string>();
   const existingTargets = new Set<string>();
-  for (const entry of result.values()) {
+  const shortcutsByLink = new Map<string, string>();
+  for (const [key, entry] of result) {
     existingNames.add(entry.name.toLowerCase());
-    const target = scannedTargetKey(entry);
-    if (target) existingTargets.add(target);
+    if (isShellAppPath(entry.path)) continue;
+    if (path.extname(entry.path).toLowerCase() === ".lnk") {
+      try {
+        const link = shell.readShortcutLink(entry.path);
+        if (link.target) {
+          existingTargets.add(path.resolve(link.target).toLowerCase());
+          if (!pinned.has(key)) shortcutsByLink.set(linkIdentity(link.target, link.args), key);
+        }
+      } catch {
+        // Unreadable shortcuts cannot be matched by target.
+      }
+      continue;
+    }
+    existingTargets.add(path.resolve(entry.path).toLowerCase());
   }
   for (const app of startApps) {
     const nameKey = app.name.trim().toLowerCase();
@@ -146,6 +146,10 @@ function mergeStartApps(
         existingNames.add(nameKey);
         continue;
       }
+    }
+    if (app.target) {
+      const shortcutKey = shortcutsByLink.get(linkIdentity(app.target, app.arguments));
+      if (shortcutKey) result.delete(shortcutKey);
     }
     existingNames.add(nameKey);
     const key = app.path.toLowerCase();
@@ -192,7 +196,8 @@ export function buildApplicationIndex(
   // resolving to the same target path a scanned shortcut points at. Start Apps
   // are also deduplicated against one another by name (Get-StartApps lists
   // duplicate auto-generated entries).
-  mergeStartApps(startApps, result);
+  const pinned = new Set(pinnedPaths.map((item) => path.resolve(item).toLowerCase()));
+  mergeStartApps(startApps, result, pinned);
 
   // A Start Menu shortcut and a desktop shortcut commonly point at the same
   // executable. They are indexed under different filesystem paths, so without
@@ -200,7 +205,6 @@ export function buildApplicationIndex(
   // resolve .lnk targets only for duplicate names; this preserves genuinely
   // different apps that happen to share a name while keeping startup scanning
   // cheap. A pinned entry wins over the Start Menu/desktop duplicate.
-  const pinned = new Set(pinnedPaths.map((item) => path.resolve(item).toLowerCase()));
   const groups = new Map<string, AppEntry[]>();
   for (const entry of result.values()) {
     const key = entry.name.toLowerCase();
