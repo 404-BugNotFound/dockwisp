@@ -16,8 +16,16 @@ Dockwisp 的原创代码按 MIT License 发布（见 `LICENSE`）。以下第三
 | ONNX Runtime | MIT | https://github.com/microsoft/onnxruntime/blob/main/LICENSE |
 | OpenCV.js (@techstark/opencv-js) | Apache-2.0 | npm 包内 `LICENSE`；https://github.com/TechStark/opencv-js |
 | @napi-rs/canvas | MIT | npm 包内 `LICENSE`；https://github.com/Brooooooklyn/canvas |
+| sharp | Apache-2.0 | npm 包内 `LICENSE`；https://github.com/lovell/sharp |
+| libvips 及其依赖（随 @img/sharp-win32-x64 分发） | Apache-2.0 AND LGPL-3.0-or-later | npm 包内 `LICENSE`；以独立 DLL 动态链接，可自行替换；https://github.com/libvips/libvips |
 | pinyin-pro | MIT | 下方全文；Copyright (c) 2022-present zh-lx |
 | @electron/asar | MIT | 下方全文；Copyright (c) 2014 GitHub Inc. |
+
+## 按需下载的组件
+
+| 组件 | 许可证 | 说明 |
+| --- | --- | --- |
+| LibreOffice | MPL-2.0 | 首次使用文档转换时，经用户确认后从 The Document Foundation 官方站点下载并校验 SHA-256；不随安装包分发。https://www.libreoffice.org/about-us/licenses |
 
 ## pinyin-pro
 
