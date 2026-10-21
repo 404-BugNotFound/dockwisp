@@ -1,7 +1,14 @@
 import { statSync } from "node:fs";
 import path from "node:path";
 
-export const LAUNCHABLE_EXTENSIONS = new Set([".lnk", ".exe", ".url", ".appref-ms"]);
+export const LAUNCHABLE_EXTENSIONS = new Set([
+  ".lnk",
+  ".exe",
+  ".url",
+  ".appref-ms",
+  ".msc",
+  ".cpl",
+]);
 
 export type CustomItemKind = "application" | "directory" | "file";
 

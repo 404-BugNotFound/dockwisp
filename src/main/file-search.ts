@@ -17,6 +17,9 @@ export interface FileSearchResult {
   message?: string;
   provider?: FileSearchProvider;
   progress?: FileSearchProgress;
+  total?: number;
+  nextOffset?: number;
+  hasMore?: boolean;
 }
 
 interface HelperResult {
@@ -24,6 +27,9 @@ interface HelperResult {
   indexing?: boolean;
   ipc?: boolean;
   results?: Array<{ path?: unknown }>;
+  offset?: unknown;
+  count?: unknown;
+  total?: unknown;
   error?: unknown;
   code?: unknown;
 }
@@ -31,6 +37,7 @@ interface HelperResult {
 // Starting a provider is only meaningful occasionally; guard repeated spawns
 // but allow a retry after a long interval if the user keeps searching.
 const RESTART_INTERVAL_MS = 5 * 60 * 1000;
+export const FILE_SEARCH_PAGE_SIZE = 100;
 
 /**
  * Full-disk file search backed by the native Everything helper. Prefers an
@@ -133,18 +140,26 @@ export class FileSearch {
   }
 
   /** Run a file query and report results plus a status for the renderer. */
-  async query(queryText: string): Promise<FileSearchResult> {
+  async query(
+    queryText: string,
+    offset = 0,
+    limit = FILE_SEARCH_PAGE_SIZE,
+  ): Promise<FileSearchResult> {
     const query = queryText.trim();
     if (!query) return { paths: [], status: "ok", provider: this.startedProvider ?? undefined };
+    const pageOffset = Number.isFinite(offset) ? Math.max(0, Math.trunc(offset)) : 0;
+    const pageLimit = Number.isFinite(limit)
+      ? Math.max(1, Math.min(500, Math.trunc(limit)))
+      : FILE_SEARCH_PAGE_SIZE;
 
-    const helper = await this.queryHelper(query);
+    const helper = await this.queryHelper(query, pageOffset, pageLimit);
 
     // Helper missing or produced unparseable output: do not spin on "indexing"
     // forever. Fall back to the bounded common-folder index.
     if (helper === null) {
       this.clearIndexingProgress();
       return {
-        paths: this.queryFallback(query),
+        ...this.queryFallbackPage(query, pageOffset, pageLimit),
         status: "fallback",
         provider: "fallback",
       };
@@ -158,7 +173,7 @@ export class FileSearch {
         }
         this.clearIndexingProgress();
         return {
-          paths: this.queryFallback(query),
+          ...this.queryFallbackPage(query, pageOffset, pageLimit),
           status: "fallback",
           provider: "fallback",
         };
@@ -168,7 +183,7 @@ export class FileSearch {
       if (Date.now() - this.providerStartedAt > 60_000) {
         this.clearIndexingProgress();
         return {
-          paths: this.queryFallback(query),
+          ...this.queryFallbackPage(query, pageOffset, pageLimit),
           status: "fallback",
           provider: "fallback",
         };
@@ -188,7 +203,23 @@ export class FileSearch {
       const paths = helper.results
         .map((item) => item.path)
         .filter((item): item is string => typeof item === "string");
-      return { paths, status: "ok", provider: this.startedProvider ?? this.preferredProvider() };
+      const returned =
+        typeof helper.count === "number" && Number.isFinite(helper.count)
+          ? Math.max(0, Math.trunc(helper.count))
+          : helper.results.length;
+      const total =
+        typeof helper.total === "number" && Number.isFinite(helper.total)
+          ? Math.max(0, Math.trunc(helper.total))
+          : pageOffset + returned;
+      const nextOffset = pageOffset + returned;
+      return {
+        paths,
+        status: "ok",
+        provider: this.startedProvider ?? this.preferredProvider(),
+        total,
+        nextOffset,
+        hasMore: returned > 0 && nextOffset < total,
+      };
     }
 
     // Query failed after the DB was loaded (not IPC, not indexing): report an
@@ -259,16 +290,47 @@ export class FileSearch {
     return true;
   }
 
-  private queryHelper(query: string): Promise<HelperResult | null> {
-    return this.runHelper(query);
+  /**
+   * Ask the bundled portable Everything to exit so an installer can replace its
+   * executable. A system-installed Everything is never touched.
+   */
+  async stopPortable(timeoutMs = 4_000): Promise<void> {
+    // "-exit" targets whichever Everything instance is running, so only send it
+    // when no system Everything exists (then the running one must be ours).
+    if (!existsSync(this.portablePath) || (await this.installedEverything())) return;
+    await new Promise<void>((resolve) => {
+      try {
+        const child = spawn(this.portablePath, ["-config", this.configPath, "-exit"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        const timer = setTimeout(() => {
+          child.kill();
+          resolve();
+        }, timeoutMs);
+        const done = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        child.on("error", done);
+        child.on("close", done);
+      } catch {
+        resolve();
+      }
+    });
+    this.providerStarted = false;
   }
 
-  private runHelper(argument: string): Promise<HelperResult | null> {
+  private queryHelper(query: string, offset: number, limit: number): Promise<HelperResult | null> {
+    return this.runHelper(query, [String(offset), String(limit)]);
+  }
+
+  private runHelper(argument: string, extraArguments: string[] = []): Promise<HelperResult | null> {
     if (!existsSync(this.helperPath)) return Promise.resolve(null);
     return new Promise((resolve) => {
       execFile(
         this.helperPath,
-        [argument],
+        [argument, ...extraArguments],
         { windowsHide: true, timeout: 5_000, maxBuffer: 8 * 1024 * 1024 },
         (error, stdout) => {
           // The helper exits non-zero for indexing/IPC states but still prints
@@ -292,6 +354,22 @@ export class FileSearch {
     const index = this.ensureFallbackIndex();
     const lower = query.toLowerCase();
     return index.filter((filePath) => path.basename(filePath).toLowerCase().includes(lower));
+  }
+
+  private queryFallbackPage(
+    query: string,
+    offset: number,
+    limit: number,
+  ): Pick<FileSearchResult, "paths" | "total" | "nextOffset" | "hasMore"> {
+    const matches = this.queryFallback(query);
+    const paths = matches.slice(offset, offset + limit);
+    const nextOffset = offset + paths.length;
+    return {
+      paths,
+      total: matches.length,
+      nextOffset,
+      hasMore: nextOffset < matches.length,
+    };
   }
 
   private ensureFallbackIndex(): string[] {

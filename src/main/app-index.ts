@@ -4,8 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import { shell } from "electron";
 import { buildSearchForms } from "../core/matcher";
+import {
+  isShellAppPath,
+  isUwpAppId,
+  resolveKnownFolderPath,
+} from "../core/start-apps";
 import { AppEntry } from "../core/types";
 import { LAUNCHABLE_EXTENSIONS } from "./custom-items";
+import { ResolvedStartApp } from "./start-apps";
 
 function entryId(filePath: string): string {
   return createHash("sha1").update(filePath.toLowerCase()).digest("hex");
@@ -78,6 +84,9 @@ function addCustomItem(filePath: string, result: Map<string, AppEntry>): void {
 }
 
 function resolvedAppKey(entry: AppEntry): string {
+  // Shell app paths (shell:AppsFolder\<AppID>) are not filesystem paths;
+  // path.resolve / readShortcutLink would corrupt them, so key them as-is.
+  if (isShellAppPath(entry.path)) return entry.path.toLowerCase();
   if (path.extname(entry.path).toLowerCase() !== ".lnk") {
     return path.resolve(entry.path).toLowerCase();
   }
@@ -90,9 +99,74 @@ function resolvedAppKey(entry: AppEntry): string {
   return path.resolve(entry.path).toLowerCase();
 }
 
+/**
+ * The resolved target of a scanned entry, for matching against KnownFolder
+ * executables. .lnk shortcuts resolve to their target; other files resolve to
+ * themselves. Shell paths have no filesystem target.
+ */
+function scannedTargetKey(entry: AppEntry): string | null {
+  if (isShellAppPath(entry.path)) return null;
+  if (path.extname(entry.path).toLowerCase() === ".lnk") {
+    try {
+      const target = shell.readShortcutLink(entry.path).target;
+      if (target) return path.resolve(target).toLowerCase();
+    } catch {
+      return null;
+    }
+    return null;
+  }
+  return path.resolve(entry.path).toLowerCase();
+}
+
+/**
+ * Merge the resolved Start Menu app list into the index, skipping entries a
+ * .lnk/.exe scan already covers (by display name or shared target path) and
+ * collapsing duplicate Start App names against one another.
+ */
+function mergeStartApps(
+  startApps: ResolvedStartApp[],
+  result: Map<string, AppEntry>,
+): void {
+  if (startApps.length === 0) return;
+  const existingNames = new Set<string>();
+  const existingTargets = new Set<string>();
+  for (const entry of result.values()) {
+    existingNames.add(entry.name.toLowerCase());
+    const target = scannedTargetKey(entry);
+    if (target) existingTargets.add(target);
+  }
+  for (const app of startApps) {
+    const nameKey = app.name.trim().toLowerCase();
+    if (!nameKey || existingNames.has(nameKey)) continue;
+    // A KnownFolder executable that a scanned shortcut already targets is a
+    // duplicate even when the display names differ.
+    if (!isUwpAppId(app.appId)) {
+      const resolved = resolveKnownFolderPath(app.appId);
+      if (resolved && existingTargets.has(resolved.toLowerCase())) {
+        existingNames.add(nameKey);
+        continue;
+      }
+    }
+    existingNames.add(nameKey);
+    const key = app.path.toLowerCase();
+    if (result.has(key)) continue;
+    const entry: AppEntry = {
+      id: entryId(app.path),
+      name: app.name,
+      path: app.path,
+      source: "start-apps",
+      isApp: true,
+      ...buildSearchForms(app.name),
+    };
+    if (app.iconPath) entry.iconPath = app.iconPath;
+    result.set(key, entry);
+  }
+}
+
 export function buildApplicationIndex(
   customItems: string[],
   pinnedPaths: string[] = [],
+  startApps: ResolvedStartApp[] = [],
 ): AppEntry[] {
   const result = new Map<string, AppEntry>();
   const appData = process.env.APPDATA;
@@ -111,6 +185,14 @@ export function buildApplicationIndex(
   for (const item of pinnedPaths) {
     if (!result.has(path.resolve(item).toLowerCase())) addCustomItem(item, result);
   }
+
+  // Merge the complete Start Menu app list (UWP apps, shell virtual items,
+  // KnownFolder executables). A synthesised entry is dropped when a .lnk/.exe
+  // already covers it: by display name, or — for a KnownFolder executable — by
+  // resolving to the same target path a scanned shortcut points at. Start Apps
+  // are also deduplicated against one another by name (Get-StartApps lists
+  // duplicate auto-generated entries).
+  mergeStartApps(startApps, result);
 
   // A Start Menu shortcut and a desktop shortcut commonly point at the same
   // executable. They are indexed under different filesystem paths, so without

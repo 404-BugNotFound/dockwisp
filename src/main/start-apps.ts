@@ -1,0 +1,211 @@
+import { spawn } from "node:child_process";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import {
+  StartApp,
+  isUwpAppId,
+  parseStartApps,
+  pickIconVariant,
+  resolveKnownFolderPath,
+  shellAppPath,
+} from "../core/start-apps";
+
+/**
+ * A Start Menu app with its icon resolved to a concrete file path. This is the
+ * shape persisted to the on-disk cache and handed to `buildApplicationIndex`.
+ */
+export interface ResolvedStartApp {
+  name: string;
+  appId: string;
+  /** Always `shell:AppsFolder\<appId>` — the launch path. */
+  path: string;
+  /** Absolute path to a renderable icon, when one could be resolved. */
+  iconPath?: string;
+}
+
+/**
+ * PowerShell script: enumerate every Start Menu app and, for UWP apps, attach
+ * the owning package's install location plus the manifest-declared logo base so
+ * the icon can be resolved on the Node side. A single pass builds a package
+ * lookup to avoid one `Get-AppxPackage` call per app.
+ */
+const ENUMERATE_SCRIPT = `
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$ErrorActionPreference = 'SilentlyContinue'
+$apps = Get-StartApps
+$pkgMap = @{}
+foreach ($p in Get-AppxPackage) {
+  if ($p.PackageFamilyName -and -not $pkgMap.ContainsKey($p.PackageFamilyName)) {
+    $pkgMap[$p.PackageFamilyName] = $p.InstallLocation
+  }
+}
+$result = foreach ($a in $apps) {
+  $row = [ordered]@{ Name = $a.Name; AppID = $a.AppID }
+  if ($a.AppID -like '*!*') {
+    $family = $a.AppID.Split('!')[0]
+    $entryId = $a.AppID.Substring($family.Length + 1)
+    $install = $pkgMap[$family]
+    if ($install) {
+      $manifestPath = Join-Path $install 'AppxManifest.xml'
+      if (Test-Path $manifestPath) {
+        try {
+          [xml]$xml = Get-Content -LiteralPath $manifestPath -Raw
+          $ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
+          $ns.AddNamespace('d','http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+          $ns.AddNamespace('uap','http://schemas.microsoft.com/appx/manifest/uap/windows10')
+          $node = $xml.SelectSingleNode("//d:Application[@Id='$entryId']", $ns)
+          if (-not $node) { $node = $xml.SelectSingleNode('//d:Application', $ns) }
+          $logo = $null
+          if ($node) {
+            $ve = $node.SelectSingleNode('uap:VisualElements', $ns)
+            if ($ve) {
+              $logo = $ve.GetAttribute('Square44x44Logo')
+              if (-not $logo) { $logo = $ve.GetAttribute('Square150x150Logo') }
+            }
+          }
+          $row.InstallLocation = $install
+          if ($logo) { $row.Logo = $logo }
+        } catch {}
+      }
+    }
+  }
+  [pscustomobject]$row
+}
+$result | ConvertTo-Json -Compress
+`;
+
+/**
+ * Enumerate the complete Start Menu app list via PowerShell. Resolves to `[]`
+ * on timeout (default 15s), spawn failure, or any non-parseable output so the
+ * caller can always build an index.
+ */
+export function enumerateStartApps(timeoutMs = 15_000): Promise<StartApp[]> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (apps: StartApp[]): void => {
+      if (settled) return;
+      settled = true;
+      resolve(apps);
+    };
+    let child;
+    try {
+      child = spawn(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ENUMERATE_SCRIPT],
+        { windowsHide: true },
+      );
+    } catch {
+      done([]);
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        // Already exited.
+      }
+      done([]);
+    }, timeoutMs);
+    const chunks: Buffer[] = [];
+    child.stdout?.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.on("error", () => {
+      clearTimeout(timer);
+      done([]);
+    });
+    child.on("close", () => {
+      clearTimeout(timer);
+      const text = Buffer.concat(chunks).toString("utf8");
+      done(parseStartApps(text));
+    });
+  });
+}
+
+/** Resolve a single Start App to a launchable entry with an icon when possible. */
+export function resolveStartApp(app: StartApp): ResolvedStartApp {
+  const entry: ResolvedStartApp = {
+    name: app.name,
+    appId: app.appId,
+    path: shellAppPath(app.appId),
+  };
+  const icon = resolveStartAppIcon(app);
+  if (icon) entry.iconPath = icon;
+  return entry;
+}
+
+/** Resolve the best on-disk icon path for a Start App, or undefined. */
+function resolveStartAppIcon(app: StartApp): string | undefined {
+  if (isUwpAppId(app.appId)) {
+    if (!app.installLocation || !app.logo) return undefined;
+    const logoDir = path.win32.join(app.installLocation, path.win32.dirname(app.logo));
+    let files: string[];
+    try {
+      files = readdirSync(logoDir);
+    } catch {
+      return undefined;
+    }
+    const chosen = pickIconVariant(app.logo, files);
+    if (!chosen) return undefined;
+    const full = path.win32.join(logoDir, chosen);
+    return existsSync(full) ? full : undefined;
+  }
+  // Non-UWP shell items: a KnownFolder-relative executable is its own icon.
+  const resolved = resolveKnownFolderPath(app.appId);
+  if (resolved && existsSync(resolved)) return resolved;
+  return undefined;
+}
+
+/** Resolve every enumerated Start App; icon failures degrade gracefully. */
+export function resolveStartApps(apps: StartApp[]): ResolvedStartApp[] {
+  return apps.map(resolveStartApp);
+}
+
+/** Load the cached resolved Start App list; returns `[]` on any failure. */
+export function loadCachedStartApps(cachePath: string): ResolvedStartApp[] {
+  try {
+    const raw = readFileSync(cachePath, "utf8");
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data)) return [];
+    return data.filter(
+      (item): item is ResolvedStartApp =>
+        item &&
+        typeof item.name === "string" &&
+        typeof item.appId === "string" &&
+        typeof item.path === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Re-enumerate and resolve the Start App list, writing it to `cachePath`, and
+ * return the fresh list. Any write failure is swallowed; the list is still
+ * returned so the caller can refresh its in-memory index.
+ */
+export async function refreshStartApps(
+  cachePath: string,
+  timeoutMs = 15_000,
+): Promise<ResolvedStartApp[]> {
+  const apps = await enumerateStartApps(timeoutMs);
+  const resolved = resolveStartApps(apps);
+  try {
+    writeFileSync(cachePath, JSON.stringify(resolved), "utf8");
+  } catch {
+    // A non-writable cache directory must not break enumeration.
+  }
+  return resolved;
+}
+
+/**
+ * Launch a Start App by its shell path (`shell:AppsFolder\<AppID>`). Uses
+ * explorer.exe, which understands the AppsFolder namespace for UWP apps, shell
+ * virtual items (Control Panel, This PC) and KnownFolder executables alike.
+ */
+export function openShellApp(shellPath: string): void {
+  const child = spawn("explorer.exe", [shellPath], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.unref();
+}

@@ -10,6 +10,12 @@ Dockwisp 的原创代码按 MIT License 发布（见 `LICENSE`）。以下第三
 | Chromium | BSD-style 及第三方许可证 | 安装目录中的 `LICENSES.chromium.html`；https://www.chromium.org/ |
 | Everything SDK | MIT + PCRE BSD | `native/sdk/License.txt`；安装包中的 `native/Everything-SDK-License.txt` |
 | Everything 便携版 | MIT + PCRE BSD | `native/portable/License.txt`；安装包中的 `native/Everything-License.txt` |
+| PP-OCRv5 ONNX 模型 | Apache-2.0 | `native/ocr-models/LICENSE`；安装包中的 `native/ocr-models/LICENSE` |
+| ppu-paddle-ocr | MIT | npm 包内 `LICENSE`；https://github.com/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr |
+| ppu-ocv | MIT | npm 包内 `LICENSE`；https://github.com/PT-Perkasa-Pilar-Utama/ppu-ocv |
+| ONNX Runtime | MIT | https://github.com/microsoft/onnxruntime/blob/main/LICENSE |
+| OpenCV.js (@techstark/opencv-js) | Apache-2.0 | npm 包内 `LICENSE`；https://github.com/TechStark/opencv-js |
+| @napi-rs/canvas | MIT | npm 包内 `LICENSE`；https://github.com/Brooooooklyn/canvas |
 | pinyin-pro | MIT | 下方全文；Copyright (c) 2022-present zh-lx |
 | @electron/asar | MIT | 下方全文；Copyright (c) 2014 GitHub Inc. |
 

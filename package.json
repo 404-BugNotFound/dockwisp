@@ -1,6 +1,6 @@
 {
   "name": "dockwisp",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "private": true,
   "description": "A clean-room Windows launcher with a plugin host.",
   "author": "Dockwisp contributors",
@@ -11,19 +11,25 @@
     "clean": "node scripts/clean.mjs",
     "build:native": "native\\build.cmd",
     "build:ts": "tsc -p tsconfig.json",
-    "build": "npm run clean && npm run build:native && npm run build:ts && node scripts/copy-static.mjs",
+    "fetch:ocr-models": "node scripts/fetch-ocr-models.mjs",
+    "verify:ocr-models": "node scripts/verify-ocr-models.mjs",
+    "build": "npm run verify:ocr-models && npm run clean && npm run build:native && npm run build:ts && node scripts/copy-static.mjs",
     "test": "tsc -p tsconfig.test.json && node --test dist-test/tests/*.test.js",
     "test:native": "node scripts/test-native.mjs",
+    "test:ocr": "npm run verify:ocr-models && node scripts/test-ocr.mjs",
     "test:translation-live": "node scripts/check-translation.mjs",
     "test:smoke": "npm run build && node scripts/run-electron.mjs --smoke-test --user-data-dir=temp/smoke-userdata",
-    "verify": "npm run test && npm run build && npm run test:native && node scripts/run-electron.mjs --smoke-test --user-data-dir=temp/smoke-userdata",
+    "verify": "npm run test && npm run test:ocr && npm run build && npm run test:native && node scripts/run-electron.mjs --ocr-smoke-test=docs/images/translation.png --user-data-dir=temp/ocr-smoke-userdata && node scripts/run-electron.mjs --smoke-test --user-data-dir=temp/smoke-userdata",
     "start": "npm run build && node scripts/run-electron.mjs",
     "dev": "npm run build && node scripts/run-electron.mjs --dev",
     "dist": "npm run verify && node scripts/dist.mjs"
   },
   "dependencies": {
     "@electron/asar": "4.3.1",
-    "pinyin-pro": "3.29.5"
+    "onnxruntime-node": "1.29.0",
+    "pinyin-pro": "3.29.5",
+    "ppu-paddle-ocr": "6.6.1",
+    "sharp": "0.35.5"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
@@ -42,7 +48,20 @@
       "dist/**/*",
       "package.json",
       "LICENSE",
-      "THIRD_PARTY_NOTICES.md"
+      "THIRD_PARTY_NOTICES.md",
+      "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**/*",
+      "!node_modules/onnxruntime-node/bin/napi-v6/linux/**/*",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**/*",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/x64/DirectML.dll",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/x64/dxcompiler.dll",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/x64/dxil.dll"
+    ],
+    "asarUnpack": [
+      "node_modules/onnxruntime-node/bin/napi-v6/win32/x64/**/*",
+      "node_modules/@napi-rs/canvas-win32-x64-msvc/**/*",
+      "node_modules/sharp/**/*",
+      "node_modules/@img/sharp-win32-x64/**/*",
+      "node_modules/@img/colour/**/*"
     ],
     "extraResources": [
       {
@@ -74,8 +93,20 @@
         "to": "native/Everything-License.txt"
       },
       {
-        "from": "native/ocr.ps1",
-        "to": "native/ocr.ps1"
+        "from": "native/ocr-models/PP-OCRv5_mobile_det_infer.onnx",
+        "to": "native/ocr-models/PP-OCRv5_mobile_det_infer.onnx"
+      },
+      {
+        "from": "native/ocr-models/PP-OCRv5_server_rec_infer.onnx",
+        "to": "native/ocr-models/PP-OCRv5_server_rec_infer.onnx"
+      },
+      {
+        "from": "native/ocr-models/ppocrv5_dict.txt",
+        "to": "native/ocr-models/ppocrv5_dict.txt"
+      },
+      {
+        "from": "native/ocr-models/LICENSE",
+        "to": "native/ocr-models/LICENSE"
       }
     ],
     "win": {

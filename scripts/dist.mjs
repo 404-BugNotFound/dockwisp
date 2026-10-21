@@ -29,6 +29,23 @@ if (result.status !== 0) {
   process.exit(result.status ?? 1);
 }
 
+// Exercise the packaged OCR worker, native ONNX binding and bundled models
+// before publishing the installer. Development-mode OCR does not prove that
+// asar unpacking and extraResources paths are correct.
+const packagedExecutable = path.join(staging, "win-unpacked", "Dockwisp.exe");
+const ocrFixture = path.resolve("docs", "images", "translation.png");
+const ocrSmokeData = path.resolve("temp", "packaged-ocr-smoke-userdata");
+await rm(ocrSmokeData, { recursive: true, force: true }).catch(() => {});
+const ocrSmoke = spawnSync(
+  packagedExecutable,
+  [`--ocr-smoke-test=${ocrFixture}`, `--user-data-dir=${ocrSmokeData}`],
+  { stdio: "inherit", windowsHide: true, timeout: 120_000 },
+);
+if (ocrSmoke.status !== 0) {
+  console.error(`dist: packaged OCR smoke test failed (${ocrSmoke.status ?? ocrSmoke.error})`);
+  process.exit(ocrSmoke.status ?? 1);
+}
+
 await mkdir(RELEASE, { recursive: true });
 for (const entry of await readdir(RELEASE)) {
   if (/\.(exe|blockmap|yml)$/i.test(entry)) {

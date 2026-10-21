@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { translateText } from "../translation/providers";
 import { MouseHelper } from "./mouse-helper";
-import { recognizeImageFile } from "./ocr";
+import { ocrResizeDimensions, recognizeImageFile } from "./ocr";
 import { SettingsStore } from "./settings";
 
 interface ScreenshotState {
@@ -279,7 +279,12 @@ export class ScreenshotController {
         tmpdir(),
         `dockwisp-ocr-${Date.now()}-${Math.random().toString(36).slice(2)}.png`,
       );
-      await writeFile(temporary, image.toPNG());
+      const size = image.getSize();
+      const resized = ocrResizeDimensions(size.width, size.height);
+      const ocrImage = resized
+        ? image.resize({ ...resized, quality: "best" })
+        : image;
+      await writeFile(temporary, ocrImage.toPNG());
       try {
         return await recognizeImageFile(temporary);
       } finally {

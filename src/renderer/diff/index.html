@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>文本对比</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <span class="brand">文本对比</span>
+
+      <div class="divider" aria-hidden="true"></div>
+
+      <label class="check">
+        <input id="optWrap" type="checkbox" checked />
+        <span>自动换行</span>
+      </label>
+      <label class="check">
+        <input id="optWhitespace" type="checkbox" />
+        <span>忽略空白</span>
+      </label>
+      <label class="check">
+        <input id="optCase" type="checkbox" />
+        <span>忽略大小写</span>
+      </label>
+      <label class="check">
+        <input id="optSync" type="checkbox" checked />
+        <span>同步滚动</span>
+      </label>
+
+      <div class="spacer"></div>
+
+      <div id="stats" class="stats" aria-live="polite">
+        <span class="stat added" id="statAdded" title="新增行">+0</span>
+        <span class="stat removed" id="statRemoved" title="删除行">−0</span>
+      </div>
+
+      <div class="nav" role="group" aria-label="差异跳转">
+        <button id="navPrev" class="icon-button" type="button" aria-label="上一处差异" title="上一处差异 (Shift+F3)">
+          <svg viewBox="0 0 24 24"><path d="M18 15l-6-6-6 6" /></svg>
+        </button>
+        <span id="navLabel" class="nav-label">0/0</span>
+        <button id="navNext" class="icon-button" type="button" aria-label="下一处差异" title="下一处差异 (F3)">
+          <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
+        </button>
+      </div>
+
+      <div class="divider" aria-hidden="true"></div>
+
+      <div class="actions">
+        <button id="btnSwap" class="soft-button" type="button" title="交换左右">交换</button>
+        <button id="btnClear" class="soft-button" type="button" title="清空两侧">清空</button>
+        <button id="btnCopy" class="soft-button" type="button" title="复制差异报告">复制</button>
+        <button id="closeWindow" class="icon-button" type="button" aria-label="关闭" title="关闭 (Esc)">
+          <svg viewBox="0 0 24 24"><path d="M6 6 L18 18 M18 6 L6 18" /></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="split">
+      <section class="pane" data-side="left" aria-label="文本 1">
+        <div class="pane-head">
+          <span class="pane-title">文本 1</span>
+          <span class="pane-meta" id="leftMeta">0 行</span>
+        </div>
+        <div class="editor-wrap" id="leftWrap">
+          <div class="gutter">
+            <div class="gutter-content" id="leftGutter"></div>
+          </div>
+          <div class="text-box" id="leftBox">
+            <div class="mirror" aria-hidden="true">
+              <div class="mirror-content" id="leftMirror"></div>
+            </div>
+            <textarea
+              id="leftInput"
+              class="editor"
+              spellcheck="false"
+              autocomplete="off"
+              autocorrect="off"
+              wrap="off"
+              placeholder="在此粘贴或输入文本，或将文本文件拖入此处…"
+              aria-label="文本 1 内容"
+            ></textarea>
+          </div>
+          <div class="drop-hint" hidden>松开以读入文件</div>
+        </div>
+      </section>
+
+      <section class="pane" data-side="right" aria-label="文本 2">
+        <div class="pane-head">
+          <span class="pane-title">文本 2</span>
+          <span class="pane-meta" id="rightMeta">0 行</span>
+        </div>
+        <div class="editor-wrap" id="rightWrap">
+          <div class="gutter">
+            <div class="gutter-content" id="rightGutter"></div>
+          </div>
+          <div class="text-box" id="rightBox">
+            <div class="mirror" aria-hidden="true">
+              <div class="mirror-content" id="rightMirror"></div>
+            </div>
+            <textarea
+              id="rightInput"
+              class="editor"
+              spellcheck="false"
+              autocomplete="off"
+              autocorrect="off"
+              wrap="off"
+              placeholder="在此粘贴或输入文本，或将文本文件拖入此处…"
+              aria-label="文本 2 内容"
+            ></textarea>
+          </div>
+          <div class="drop-hint" hidden>松开以读入文件</div>
+        </div>
+      </section>
+    </main>
+
+    <div id="searchBar" class="search-bar" hidden>
+      <input
+        id="searchInput"
+        class="search-input"
+        type="text"
+        placeholder="搜索…"
+        aria-label="搜索文本"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <span id="searchCount" class="search-count">0/0</span>
+      <div class="seg small" role="group" aria-label="搜索范围">
+        <button id="searchLeft" class="seg-button" type="button" aria-pressed="false">左</button>
+        <button id="searchBoth" class="seg-button" type="button" aria-pressed="true">两侧</button>
+        <button id="searchRight" class="seg-button" type="button" aria-pressed="false">右</button>
+      </div>
+      <button id="searchPrev" class="icon-button" type="button" aria-label="上一个" title="上一个 (Shift+Enter)">
+        <svg viewBox="0 0 24 24"><path d="M18 15l-6-6-6 6" /></svg>
+      </button>
+      <button id="searchNext" class="icon-button" type="button" aria-label="下一个" title="下一个 (Enter)">
+        <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
+      </button>
+      <button id="searchClose" class="icon-button" type="button" aria-label="关闭搜索" title="关闭 (Esc)">
+        <svg viewBox="0 0 24 24"><path d="M6 6 L18 18 M18 6 L6 18" /></svg>
+      </button>
+    </div>
+
+    <footer class="statusbar">
+      <span id="status"></span>
+      <span class="hint">Ctrl+F 搜索 · F3 下一处差异 · Esc 关闭</span>
+    </footer>
+
+    <div id="toast" class="toast" hidden></div>
+  </body>
+</html>

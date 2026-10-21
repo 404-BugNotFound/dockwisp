@@ -293,6 +293,7 @@ export function searchApps(
       score,
       path: entry.path,
       pinned: isPinned,
+      ...(entry.iconPath ? { iconPath: entry.iconPath } : {}),
     }));
 }
 
@@ -321,7 +322,7 @@ const EXECUTABLE_EXTENSIONS = new Set([".exe", ".lnk", ".url", ".appref-ms"]);
 export function rankFilePaths(
   paths: string[],
   queryText: string,
-  limit = 40,
+  limit = Number.POSITIVE_INFINITY,
 ): Array<{ path: string; title: string; score: number }> {
   const query = queryText.trim().toLowerCase();
   const seen = new Set<string>();
@@ -331,7 +332,6 @@ export function rankFilePaths(
     const key = filePath.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    if (isNoisyPath(filePath)) continue;
     const basename = path.basename(filePath);
     // File ranking is deliberately pinyin-free: Everything can return hundreds
     // of candidates and building pinyin forms for each one is far too expensive.
@@ -343,10 +343,13 @@ export function rankFilePaths(
           initials: "",
         })
       : 0;
-    if (query && score < 0) continue;
     const extension = path.extname(basename).toLowerCase();
     const executableBoost = EXECUTABLE_EXTENSIONS.has(extension) ? 100 : 0;
-    scored.push({ path: filePath, title: basename, score: score + executableBoost });
+    scored.push({
+      path: filePath,
+      title: basename,
+      score: Math.max(0, score) + executableBoost,
+    });
   }
   return scored
     .sort(

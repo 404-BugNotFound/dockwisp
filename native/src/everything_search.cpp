@@ -1,7 +1,11 @@
+#define NOMINMAX
 #include <windows.h>
 #include <shellapi.h>
 
+#include <algorithm>
+#include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -42,6 +46,14 @@ std::string json_escape(const std::string& value) {
   }
   return output.str();
 }
+
+DWORD parse_page_argument(const wchar_t* value, DWORD fallback, DWORD maximum) {
+  if (!value || !*value) return fallback;
+  wchar_t* end = nullptr;
+  const unsigned long parsed = std::wcstoul(value, &end, 10);
+  if (end == value || *end != L'\0') return fallback;
+  return static_cast<DWORD>(std::min<unsigned long>(parsed, maximum));
+}
 }  // namespace
 
 int main() {
@@ -71,6 +83,10 @@ int main() {
   }
 
   const std::wstring query = first;
+  const DWORD offset = argument_count >= 3
+                           ? parse_page_argument(arguments[2], 0, std::numeric_limits<DWORD>::max())
+                           : 0;
+  const DWORD limit = argument_count >= 4 ? parse_page_argument(arguments[3], 100, 500) : 100;
   LocalFree(arguments);
   if (query.empty()) {
     std::cout << "{\"ok\":true,\"results\":[]}" << std::endl;
@@ -89,12 +105,16 @@ int main() {
     return 4;
   }
 
-  Everything_SetSearchW(query.c_str());
+  // Dockwisp's file-search mode deliberately excludes folders. Applying the
+  // filter in Everything keeps page offsets and total counts exact.
+  const std::wstring file_query = L"file:" + query;
+  Everything_SetSearchW(file_query.c_str());
   Everything_SetMatchPath(FALSE);
   Everything_SetMatchCase(FALSE);
   Everything_SetMatchWholeWord(FALSE);
   Everything_SetRegex(FALSE);
-  Everything_SetMax(500);
+  Everything_SetOffset(offset);
+  Everything_SetMax(std::max<DWORD>(1, limit));
   Everything_SetRequestFlags(EVERYTHING_REQUEST_FILE_NAME | EVERYTHING_REQUEST_PATH |
                              EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME);
   Everything_SetSort(EVERYTHING_SORT_NAME_ASCENDING);
@@ -112,9 +132,11 @@ int main() {
   }
 
   const DWORD count = Everything_GetNumResults();
+  const DWORD total = Everything_GetTotResults();
   std::vector<wchar_t> buffer(32768);
   std::ostringstream output;
-  output << "{\"ok\":true,\"results\":[";
+  output << "{\"ok\":true,\"offset\":" << offset << ",\"count\":" << count
+         << ",\"total\":" << total << ",\"results\":[";
   bool first_result = true;
   for (DWORD index = 0; index < count; ++index) {
     if (!Everything_IsFileResult(index)) continue;

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hosts 切换</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <div class="sidebar-title">方案</div>
+        <div class="sidebar-tools">
+          <button id="addProfile" class="icon-button" type="button" title="新建方案" aria-label="新建方案">
+            <svg viewBox="0 0 24 24"><path d="M12 5v14 M5 12h14" /></svg>
+          </button>
+          <button id="importRemote" class="icon-button" type="button" title="导入远程方案" aria-label="导入远程方案">
+            <svg viewBox="0 0 24 24"><path d="M12 3v12 M7 10l5 5 5-5 M5 20h14" /></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="exclusive-row">
+        <label class="switch">
+          <input id="exclusiveToggle" type="checkbox" aria-describedby="exclusiveHint" />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+          <span class="switch-label">单选模式</span>
+        </label>
+        <p id="exclusiveHint" class="exclusive-hint">开启后同一时间只启用一个方案，打开一个会自动关闭其他；关闭时可多个方案叠加生效。</p>
+      </div>
+
+      <ul id="profileList" class="profile-list"></ul>
+    </aside>
+
+    <main class="editor-pane">
+      <header class="editor-head">
+        <div class="editor-meta">
+          <div id="editorTitle" class="editor-title">系统 hosts</div>
+          <div id="editorSubtitle" class="editor-subtitle"></div>
+        </div>
+        <div class="editor-actions">
+          <button id="refreshRemote" class="soft-button" type="button" hidden>刷新</button>
+          <button id="renameProfile" class="soft-button" type="button" hidden>重命名</button>
+          <button id="deleteProfile" class="soft-button danger" type="button" hidden>删除</button>
+        </div>
+      </header>
+
+      <div class="editor-body">
+        <div class="code-scroll" id="codeScroll">
+          <div class="gutter" id="gutter" aria-hidden="true"></div>
+          <div class="code-stack">
+            <pre class="highlight" id="highlight" aria-hidden="true"></pre>
+            <textarea
+              id="editor"
+              class="code-input"
+              spellcheck="false"
+              autocomplete="off"
+              autocapitalize="off"
+              wrap="off"
+            ></textarea>
+          </div>
+        </div>
+        <div id="readonlyBadge" class="readonly-badge" hidden>只读 · 当前系统文件</div>
+      </div>
+
+      <footer class="editor-foot">
+        <div id="validation" class="validation">—</div>
+        <div class="foot-actions">
+          <span id="savedHint" class="saved-hint"></span>
+          <button id="applyButton" class="soft-button primary" type="button">应用到系统</button>
+        </div>
+      </footer>
+    </main>
+
+    <!-- modal: used for create / rename / import -->
+    <div id="modal" class="modal" hidden>
+      <div class="modal-card">
+        <div id="modalTitle" class="modal-title">新建方案</div>
+        <label class="field">
+          <span id="modalNameLabel" class="field-label">名称</span>
+          <input id="modalName" class="field-input" type="text" />
+        </label>
+        <label id="modalUrlField" class="field" hidden>
+          <span class="field-label">远程地址 (http/https)</span>
+          <input id="modalUrl" class="field-input" type="text" placeholder="https://example.com/hosts" />
+        </label>
+        <div id="modalError" class="modal-error" hidden></div>
+        <div class="modal-actions">
+          <button id="modalCancel" class="soft-button" type="button">取消</button>
+          <button id="modalConfirm" class="soft-button primary" type="button">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" hidden></div>
+  </body>
+</html>

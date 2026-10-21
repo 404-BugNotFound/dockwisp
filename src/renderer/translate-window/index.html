@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>翻译</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="lang-group">
+        <label class="lang-field">
+          <span class="lang-caption">源语言</span>
+          <select id="sourceLang" class="lang-select" aria-label="源语言"></select>
+        </label>
+        <button id="swapLang" class="icon-button swap" type="button" aria-label="交换语言" title="交换语言">
+          <svg viewBox="0 0 24 24"><path d="M7 4 L3 8 L7 12 M3 8 H17" /><path d="M17 20 L21 16 L17 12 M21 16 H7" /></svg>
+        </button>
+        <label class="lang-field">
+          <span class="lang-caption">目标语言</span>
+          <select id="targetLang" class="lang-select" aria-label="目标语言"></select>
+        </label>
+      </div>
+
+      <div class="spacer"></div>
+
+      <label class="check">
+        <input id="optAuto" type="checkbox" checked />
+        <span>自动翻译</span>
+      </label>
+      <button id="btnTranslate" class="soft-button primary" type="button" title="立即翻译 (Ctrl+Enter)">翻译</button>
+      <button id="closeWindow" class="icon-button" type="button" aria-label="关闭" title="关闭 (Esc)">
+        <svg viewBox="0 0 24 24"><path d="M6 6 L18 18 M18 6 L6 18" /></svg>
+      </button>
+    </header>
+
+    <main class="split">
+      <section class="pane" data-side="source" aria-label="原文">
+        <div class="pane-head">
+          <span class="pane-title">原文</span>
+          <span class="pane-meta" id="sourceMeta">0 字</span>
+        </div>
+        <div class="editor-wrap">
+          <textarea
+            id="sourceText"
+            class="editor"
+            spellcheck="false"
+            autocomplete="off"
+            autocorrect="off"
+            placeholder="在此输入或粘贴要翻译的文本…"
+            aria-label="原文内容"
+          ></textarea>
+        </div>
+      </section>
+
+      <section class="pane" data-side="target" aria-label="译文">
+        <div class="pane-head">
+          <span class="pane-title">译文</span>
+          <span class="pane-meta" id="targetMeta">0 字</span>
+        </div>
+        <div class="editor-wrap">
+          <textarea
+            id="targetText"
+            class="editor result"
+            spellcheck="false"
+            readonly
+            placeholder="译文将显示在这里"
+            aria-label="译文内容"
+          ></textarea>
+          <div id="overlay" class="overlay" hidden>
+            <span class="spinner" aria-hidden="true"></span>
+            <span id="overlayText">翻译中…</span>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="statusbar">
+      <div class="status-left">
+        <span id="counts">原文 0 字 · 译文 0 字</span>
+        <span class="dot" aria-hidden="true">·</span>
+        <span id="providerName">MyMemory</span>
+      </div>
+      <div class="status-right">
+        <span id="errorMsg" class="error" hidden></span>
+        <button id="btnCopy" class="soft-button" type="button" title="复制译文">复制译文</button>
+        <button id="btnClear" class="soft-button" type="button" title="清空">清空</button>
+      </div>
+    </footer>
+
+    <div id="toast" class="toast" hidden></div>
+  </body>
+</html>

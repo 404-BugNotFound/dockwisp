@@ -353,15 +353,11 @@ export class TranslationController {
     const send = () => this.sendState(state);
     if (window.webContents.isLoading()) window.webContents.once("did-finish-load", send);
     else send();
-    // Focus the popup so a click on any other window produces a blur and closes
-    // the unpinned card. The native helper makes foreground activation reliable
-    // when this was triggered by a global mouse hook.
-    window.show();
-    window.focus();
-    const handle = window.getNativeWindowHandle();
-    const nativeHandle =
-      handle.length >= 8 ? handle.readBigUInt64LE(0) : BigInt(handle.readUInt32LE(0));
-    void this.helper.focusWindow(nativeHandle).catch(() => undefined);
+    // Do not steal focus while the middle button is still held. Otherwise the
+    // originating app can reclaim focus on mouse-up, immediately firing blur
+    // and hiding the popup. Once the user clicks the popup it receives focus,
+    // so the existing blur-to-close behaviour still applies from then on.
+    window.showInactive();
     if (this.autoHideTimer) clearTimeout(this.autoHideTimer);
     if (!this.pinned) {
       this.autoHideTimer = setTimeout(() => this.hide(), 14_000);

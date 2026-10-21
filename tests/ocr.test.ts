@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeOcrText } from "../src/main/ocr";
+import { normalizeOcrText, ocrResizeDimensions } from "../src/main/ocr";
 
 test("removes spaces the OCR engine inserts between CJK characters", () => {
   assert.equal(normalizeOcrText("截 图 测 试"), "截图测试");
@@ -32,4 +32,11 @@ test("preserves line breaks", () => {
 
 test("normalizes CRLF to LF and trims trailing whitespace", () => {
   assert.equal(normalizeOcrText("第 一 行  \r\n第 二 行"), "第一行\n第二行");
+});
+
+test("upscales small OCR captures without exceeding the model input size", () => {
+  assert.deepEqual(ocrResizeDimensions(500, 64), { width: 1000, height: 128 });
+  assert.deepEqual(ocrResizeDimensions(1200, 800), { width: 1920, height: 1280 });
+  assert.equal(ocrResizeDimensions(1920, 1080), null);
+  assert.equal(ocrResizeDimensions(0, 100), null);
 });

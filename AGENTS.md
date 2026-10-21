@@ -28,3 +28,10 @@
 
 - 不要自动启动、重启或关闭 Dockwisp；由用户决定。
 - 修改后报告安装包路径，以及需要用户手动执行的步骤。
+
+## Cloned Dependency Source
+
+Read-only dependency source repositories are available under
+`.slim/clonedeps/repos/` for inspection. Do not edit these clones.
+
+- `.slim/clonedeps/repos/PT-Perkasa-Pilar-Utama__ppu-paddle-ocr/` - `ppu-paddle-ocr` at `v6.6.1`; reference for local PP-OCRv5 model loading, preprocessing, and ONNX Runtime lifecycle.

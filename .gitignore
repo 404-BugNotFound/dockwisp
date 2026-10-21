@@ -7,6 +7,9 @@ temp/*
 native/bin/
 native/obj/
 native/portable/Everything.lng
+native/ocr-models/*
+!native/ocr-models/README.md
+!native/ocr-models/LICENSE
 *.exe
 *.dll
 *.lib
@@ -22,3 +25,7 @@ native/portable/Everything.lng
 .DS_Store
 Thumbs.db
 *.tsbuildinfo
+
+# BEGIN oh-my-opencode-slim clonedeps
+.slim/clonedeps/repos/
+# END oh-my-opencode-slim clonedeps

@@ -32,6 +32,7 @@ import {
 } from "../core/calculator";
 import { resolveTextTool } from "../core/text-tools";
 import {
+  AppEntry,
   AppMatch,
   BuiltinMatch,
   CommandMatch,
@@ -43,6 +44,15 @@ import {
   SearchMatch,
 } from "../core/types";
 import { buildApplicationIndex } from "./app-index";
+import { englishTranslateScore, matchBuiltinFeatures } from "../core/builtin-features";
+import { TranslateWindowController } from "./translate-window-controller";
+import { isShellAppPath } from "../core/start-apps";
+import { loadCachedStartApps, openShellApp, refreshStartApps } from "./start-apps";
+import { registerUpdater } from "./updater";
+import { HostsController } from "./hosts-controller";
+import { DiffController } from "./diff-controller";
+import { ConvertController } from "./convert-controller";
+import { isConvertibleFile } from "../core/file-convert";
 import {
   customItemKey,
   describeCustomItems,
@@ -51,8 +61,9 @@ import {
   removeCustomItem,
 } from "./custom-items";
 import { CurrencyRates } from "./currency";
-import { FileSearch } from "./file-search";
+import { FILE_SEARCH_PAGE_SIZE, FileSearch, type FileSearchResult } from "./file-search";
 import { MouseHelper } from "./mouse-helper";
+import { recognizeImageFile } from "./ocr";
 import { PluginHost } from "./plugin-host";
 import { PluginPackageInstaller } from "./plugin-package";
 import { PluginRegistry } from "./plugin-registry";
@@ -187,6 +198,64 @@ function normalizeInput(raw: unknown): SearchInput {
     return { type: "img", data: input.data };
   }
   return { type: "text", data: typeof input.data === "string" ? input.data : "" };
+}
+
+/**
+ * Single-file fast path: read the legacy CF_FILENAMEW clipboard format directly.
+ * Explorer writes it alongside CF_HDROP for a single copied file; it holds one
+ * UTF-16LE path terminated by a NUL. Returns [] when absent or unreadable, so
+ * the caller falls through to the PowerShell FileDropList path for multi-file
+ * copies. We do NOT gate this on clipboard.availableFormats(), which does not
+ * reliably report the format name for an Explorer copy.
+ */
+function readClipboardFileNameW(): string[] {
+  try {
+    const buffer = clipboard.readBuffer("FileNameW");
+    if (!buffer || buffer.length === 0) return [];
+    let text = buffer.toString("utf16le");
+    const nul = text.indexOf("\u0000");
+    if (nul >= 0) text = text.slice(0, nul);
+    text = text.trim();
+    if (!text || !existsSync(text)) return [];
+    return [text];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Multi-file path: ask PowerShell for the full FileDropList. Run without any
+ * availableFormats() precheck (it misses Explorer's CF_HDROP). powershell.exe
+ * 5.1 runs STA by default, which Get-Clipboard -Format FileDropList requires.
+ */
+function readClipboardFileDropList(): Promise<string[]> {
+  return new Promise((resolve) => {
+    const child = spawn(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-STA",
+        "-Command",
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard -Format FileDropList | ForEach-Object { $_.FullName }",
+      ],
+      { windowsHide: true },
+    );
+    let output = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => (output += chunk));
+    const timer = setTimeout(() => child.kill(), 5_000);
+    child.on("error", () => resolve([]));
+    child.on("close", () => {
+      clearTimeout(timer);
+      resolve(
+        output
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line && existsSync(line)),
+      );
+    });
+  });
 }
 
 interface SystemCommand {
@@ -638,34 +707,45 @@ function systemMatches(query: string, lower: string): BuiltinMatch[] {
 }
 
 function builtinMatches(input: SearchInput): BuiltinMatch[] {
+  // File inputs are handled separately (convert targets) in the search handler.
   if (input.type !== "text") return [];
   const query = input.data.trim();
   if (!query) return [];
   const lower = query.toLowerCase();
   const matches: BuiltinMatch[] = [];
-  if ("设置".includes(query) || query.startsWith("设置") || "settings".startsWith(lower)) {
+  // Table-driven fuzzy matching (prefix / pinyin / initials) for every built-in
+  // feature, so "文" surfaces both 文件转换 and 文本对比, "wjzh"/"wbdb" and the
+  // initials all hit, instead of the old hand-written includes/startsWith list.
+  for (const { id, score } of matchBuiltinFeatures(query)) {
+    const meta = BUILTIN_FEATURE_META[id];
+    if (!meta) continue;
     matches.push({
-      id: "builtin:settings",
+      id,
       kind: "builtin",
-      action: "settings",
-      title: "设置",
-      subtitle: "快捷键、外观与翻译服务",
-      score: 1_260,
-      iconUrl: SYSTEM_ICON_URLS.settings,
+      action: meta.action,
+      title: meta.title,
+      subtitle: meta.subtitle,
+      score,
+      ...(meta.payload !== undefined ? { payload: meta.payload } : {}),
+      ...(meta.iconUrl ? { iconUrl: meta.iconUrl } : {}),
     });
   }
-  if (query.startsWith("插件") || "plugins".startsWith(lower)) {
-    matches.push({
-      id: "builtin:plugins",
-      kind: "builtin",
-      action: "plugins",
-      title: "插件",
-      subtitle: "管理已安装插件与内置工具",
-      score: 1_255,
-      iconUrl: PLUGIN_ICON_URL,
-    });
-  }
+  // "翻译 xxx" / "translate xxx" keeps its parameterised special handling.
   const explicit = query.match(/^(?:翻译|translate)\s+(.+)$/i);
+  // English text: offer to open the editable translation window with it.
+  const englishScore = explicit ? -1 : englishTranslateScore(query);
+  if (englishScore >= 0) {
+    matches.push({
+      id: "builtin:translate-text",
+      kind: "builtin",
+      action: "translate-window",
+      title: "翻译",
+      subtitle: `翻译 “${query.length > 40 ? `${query.slice(0, 40)}…` : query}”`,
+      score: englishScore,
+      payload: query,
+      iconUrl: TRANSLATE_ICON_URL,
+    });
+  }
   if (explicit) {
     const payload = explicit[1];
     matches.push({
@@ -676,36 +756,6 @@ function builtinMatches(input: SearchInput): BuiltinMatch[] {
       subtitle: "使用已配置的翻译提供器",
       score: 1_100,
       payload,
-    });
-  }
-  // Discoverable entry point for window switching; the renderer rewrites the
-  // input to "窗口 " and re-searches when chosen.
-  if (query === "窗口" || lower === "window" || query === "切换窗口") {
-    matches.push({
-      id: "builtin:window-search",
-      kind: "builtin",
-      action: "window-search",
-      title: "切换窗口",
-      subtitle: "输入“窗口 关键词”筛选窗口",
-      score: 1_200,
-      payload: "",
-    });
-  }
-  if (
-    query.startsWith("截") ||
-    query.includes("截图") ||
-    query.includes("截屏") ||
-    "screenshot".startsWith(lower) ||
-    "capture".startsWith(lower)
-  ) {
-    matches.push({
-      id: "builtin:screenshot",
-      kind: "builtin",
-      action: "screenshot",
-      title: "截图",
-      subtitle: "区域截图 · 编辑 · OCR · 翻译",
-      score: 1_250,
-      iconUrl: SCREENSHOT_ICON_URL,
     });
   }
   matches.push(...systemMatches(query, lower));
@@ -847,6 +897,96 @@ const FILE_SEARCH_ICON_URL =
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M16.4 16.4 21 21"/></svg>',
   );
 
+const HOSTS_ICON_URL =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>',
+  );
+
+const DIFF_ICON_URL =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7.5" height="16" rx="1.5"/><rect x="13.5" y="4" width="7.5" height="16" rx="1.5"/><path d="M5.5 9h2.5M5.5 13h2.5M16 9h2.5M16 13h2.5"/></svg>',
+  );
+
+const TRANSLATE_ICON_URL =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h8M8 3v2M6 5c0 4 2.5 7 6 8M10 5c-.5 3.5-3 6.5-6 8"/><path d="m13 21 4-9 4 9M14.5 18h5"/></svg>',
+  );
+
+const CONVERT_ICON_URL =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h13l-3.5-3.5M20 16H7l3.5 3.5"/></svg>',
+  );
+
+/**
+ * Presentation + action metadata for each built-in feature id, keyed to the
+ * ids in src/core/builtin-features.ts. `builtinMatches` looks a feature up here
+ * after `matchBuiltinFeatures` scores the query. Defined after the icon URL
+ * constants so it can reference them at module-init time.
+ */
+interface BuiltinFeatureMeta {
+  action: BuiltinMatch["action"];
+  title: string;
+  subtitle: string;
+  payload?: string;
+  iconUrl?: string;
+}
+
+const BUILTIN_FEATURE_META: Record<string, BuiltinFeatureMeta> = {
+  "builtin:settings": {
+    action: "settings",
+    title: "设置",
+    subtitle: "快捷键、外观与翻译服务",
+    iconUrl: SYSTEM_ICON_URLS.settings,
+  },
+  "builtin:plugins": {
+    action: "plugins",
+    title: "插件",
+    subtitle: "管理已安装插件与内置工具",
+    iconUrl: PLUGIN_ICON_URL,
+  },
+  "builtin:screenshot": {
+    action: "screenshot",
+    title: "截图",
+    subtitle: "区域截图 · 编辑 · OCR · 翻译",
+    iconUrl: SCREENSHOT_ICON_URL,
+  },
+  "builtin:hosts": {
+    action: "hosts",
+    title: "hosts 切换",
+    subtitle: "管理并切换多套 hosts 方案",
+    iconUrl: HOSTS_ICON_URL,
+  },
+  "builtin:diff": {
+    action: "diff",
+    title: "文本对比",
+    subtitle: "左右对比两段文本并高亮差异",
+    iconUrl: DIFF_ICON_URL,
+  },
+  "builtin:convert": {
+    action: "convert",
+    title: "文件转换",
+    subtitle: "图片、数据、PDF、Office 与音视频格式互转",
+    iconUrl: CONVERT_ICON_URL,
+  },
+  "builtin:window-search": {
+    action: "window-search",
+    title: "切换窗口",
+    subtitle: "输入“窗口 关键词”筛选窗口",
+    payload: "",
+  },
+  "builtin:translate-window": {
+    action: "translate-window",
+    title: "翻译",
+    subtitle: "打开翻译窗口，编辑并翻译文本",
+    payload: "",
+    iconUrl: TRANSLATE_ICON_URL,
+  },
+};
+
 function pluginIconUrl(plugin: LoadedPlugin): string | undefined {
   const logo = plugin.manifest.logo;
   if (!logo) return undefined;
@@ -908,6 +1048,10 @@ async function serializeMatch(
     }
     return match;
   }
+  if (match.kind === "app" && withIcon && match.iconPath) {
+    const iconUrl = await appIconUrl(match.iconPath);
+    if (iconUrl) return { ...match, iconUrl };
+  }
   if ((match.kind === "app" || match.kind === "file") && withIcon) {
     const iconUrl = await appIconUrl(match.path);
     return iconUrl ? { ...match, iconUrl } : match;
@@ -964,7 +1108,7 @@ function pinnedAppPaths(pinned: PinnedMatch[]): string[] {
 function pinnedToMatch(snapshot: PinnedMatch, index: number): SearchMatch | null {
   const score = 1_000 - index;
   if (snapshot.kind === "app") {
-    if (!snapshot.path || !existsSync(snapshot.path)) return null;
+    if (!snapshot.path || (!isShellAppPath(snapshot.path) && !existsSync(snapshot.path))) return null;
     return {
       id: snapshot.id,
       kind: "app",
@@ -1097,6 +1241,9 @@ async function createTray(): Promise<void> {
 
 void app.whenReady().then(async () => {
   const smokeTest = process.argv.includes("--smoke-test");
+  const ocrSmokeTestPath = process.argv
+    .find((item) => item.startsWith("--ocr-smoke-test="))
+    ?.slice(17);
   const devMode = process.argv.includes("--dev");
   const captureUiPath = process.argv.find((item) => item.startsWith("--capture-ui="))?.slice(13);
   const captureSettingsPath = process.argv
@@ -1116,10 +1263,15 @@ void app.whenReady().then(async () => {
   registry.reload();
   const packageInstaller = new PluginPackageInstaller(userPluginRoot);
 
-  let applications = buildApplicationIndex(
-    settingsStore.get().customLaunchItems,
-    pinnedAppPaths(settingsStore.get().pinnedMatches),
-  );
+  const startAppsCache = path.join(app.getPath("userData"), "start-apps.json");
+  let startApps = loadCachedStartApps(startAppsCache);
+  const rebuildApplications = (): AppEntry[] =>
+    buildApplicationIndex(
+      settingsStore.get().customLaunchItems,
+      pinnedAppPaths(settingsStore.get().pinnedMatches),
+      startApps,
+    );
+  let applications = rebuildApplications();
   let commands = registry.getCommands();
   registry.on("changed", () => {
     commands = registry.getCommands();
@@ -1293,23 +1445,28 @@ void app.whenReady().then(async () => {
   // Warm up the Everything provider shortly after startup so the first file
   // search does not pay the spawn/index latency. Skip in test/capture modes to
   // avoid launching Everything in automated environments.
-  if (!smokeTest && !captureUiPath && !captureSettingsPath) {
+  if (!smokeTest && !ocrSmokeTestPath && !captureUiPath && !captureSettingsPath) {
     setTimeout(() => void fileSearch.warmUp(), 1_200);
   }
 
-  const rememberMatches = (matches: SearchMatch[]): void => {
-    lastMatches.clear();
+  const rememberMatches = (matches: SearchMatch[], append = false): void => {
+    if (!append) lastMatches.clear();
     for (const match of matches) lastMatches.set(match.id, match);
   };
 
   /** Rebuild the in-memory app index after an external install/uninstall. */
   const refreshApplications = (): void => {
-    applications = buildApplicationIndex(
-      settingsStore.get().customLaunchItems,
-      pinnedAppPaths(settingsStore.get().pinnedMatches),
-    );
+    applications = rebuildApplications();
     launcher?.webContents.send("launcher:index-updated");
   };
+  if (!smokeTest && !ocrSmokeTestPath) {
+    void refreshStartApps(startAppsCache)
+      .then((fresh) => {
+        startApps = fresh;
+        refreshApplications();
+      })
+      .catch(() => {});
+  }
 
   /**
    * A stale result (for example an app uninstalled while Dockwisp was running)
@@ -1349,7 +1506,7 @@ void app.whenReady().then(async () => {
   };
 
   const rankFileMatches = (paths: string[], query: string): FileMatch[] =>
-    rankFilePaths(paths, query, 40).map((item) => ({
+    rankFilePaths(paths, query).map((item) => ({
       id: `file:${sha1(item.path)}`,
       kind: "file" as const,
       title: item.title,
@@ -1504,6 +1661,32 @@ void app.whenReady().then(async () => {
 
   const screenshotController = new ScreenshotController(launcher, settingsStore, helper);
   screenshot = screenshotController;
+  const hostsController = new HostsController(settingsStore);
+  const diffController = new DiffController(settingsStore);
+  const convertController = new ConvertController(settingsStore);
+  const translateWindow = new TranslateWindowController(settingsStore);
+  const convertedOutputs = new Set<string>();
+  registerUpdater({
+    getWindow: () => launcher,
+    onBeforeInstall: async () => {
+      quitting = true;
+      // Release files under resources/native so the installer can overwrite them.
+      helper.stop();
+      await Promise.all([
+        new Promise((resolve) => setTimeout(resolve, 700)),
+        fileSearch.stopPortable(),
+      ]);
+    },
+  });
+  ipcMain.on("builtin:open", (event, id: unknown) => {
+    if (!launcher || event.sender !== launcher.webContents) return;
+    launcher.hide();
+    if (id === "builtin:screenshot") void screenshotController.open();
+    else if (id === "builtin:hosts") hostsController.open();
+    else if (id === "builtin:diff") diffController.open();
+    else if (id === "builtin:convert") convertController.open();
+    else if (id === "builtin:translate-window") translateWindow.open();
+  });
   const previewController = new PreviewController(settingsStore, () => {
     // Closing a preview returns to the existing file results instead of
     // leaving the launcher hidden. The renderer keeps its result list, so a
@@ -1536,6 +1719,42 @@ void app.whenReady().then(async () => {
         builtin: true,
         iconUrl: SCREENSHOT_ICON_URL,
       },
+      {
+        id: "builtin:hosts",
+        name: "hosts 切换",
+        description: "多方案管理与一键切换系统 hosts",
+        version: "内置",
+        featureCount: 1,
+        builtin: true,
+        iconUrl: HOSTS_ICON_URL,
+      },
+      {
+        id: "builtin:diff",
+        name: "文本对比",
+        description: "左右对比文本，高亮行/字符差异，支持搜索",
+        version: "内置",
+        featureCount: 1,
+        builtin: true,
+        iconUrl: DIFF_ICON_URL,
+      },
+      {
+        id: "builtin:convert",
+        name: "文件转换",
+        description: "图片、数据、PDF、Office 与音视频格式互转",
+        version: "内置",
+        featureCount: 1,
+        builtin: true,
+        iconUrl: CONVERT_ICON_URL,
+      },
+      {
+        id: "builtin:translate-window",
+        name: "翻译",
+        description: "编辑文本并翻译，支持多语种与自动检测",
+        version: "内置",
+        featureCount: 1,
+        builtin: true,
+        iconUrl: TRANSLATE_ICON_URL,
+      },
       ...installed,
     ];
   });
@@ -1548,11 +1767,32 @@ void app.whenReady().then(async () => {
       const fileMode = input.data.match(/^(?:文件|file)\s+(.*)$/i);
       if (fileMode) {
         const query = fileMode[1].trim();
+        const requestedOffset =
+          rawInput && typeof rawInput === "object"
+            ? (rawInput as { fileOffset?: unknown }).fileOffset
+            : undefined;
+        const fileOffset =
+          typeof requestedOffset === "number" &&
+          Number.isSafeInteger(requestedOffset) &&
+          requestedOffset >= 0
+            ? Math.min(requestedOffset, 0xffffffff)
+            : 0;
+        const filePage = async (
+          matches: SearchMatch[],
+          result?: Pick<FileSearchResult, "total" | "nextOffset" | "hasMore">,
+        ) => ({
+          matches: await serializeMatches(matches),
+          filePage: {
+            total: result?.total ?? matches.length,
+            nextOffset: result?.nextOffset ?? fileOffset,
+            hasMore: result?.hasMore === true,
+          },
+        });
         if (!query) {
           rememberMatches([]);
-          return [];
+          return filePage([]);
         }
-        const result = await fileSearch.query(query);
+        const result = await fileSearch.query(query, fileOffset, FILE_SEARCH_PAGE_SIZE);
         if (result.status === "indexing") {
           const provider = result.provider === "system" ? "系统 Everything" : "便携版 Everything";
           const elapsedSeconds = Math.floor((result.progress?.elapsedMs ?? 0) / 1_000);
@@ -1571,7 +1811,7 @@ void app.whenReady().then(async () => {
             payload: query,
           };
           rememberMatches([match]);
-          return serializeMatches([match]);
+          return filePage([match]);
         }
         if (result.status === "error") {
           const match: BuiltinMatch = {
@@ -1583,9 +1823,13 @@ void app.whenReady().then(async () => {
             score: 9999,
           };
           rememberMatches([match]);
-          return serializeMatches([match]);
+          return filePage([match]);
         }
-        if (result.status === "fallback" && result.paths.length === 0) {
+        if (
+          result.status === "fallback" &&
+          result.paths.length === 0 &&
+          result.hasMore !== true
+        ) {
           const match: BuiltinMatch = {
             id: "status:file-empty",
             kind: "builtin",
@@ -1595,11 +1839,11 @@ void app.whenReady().then(async () => {
             score: 9999,
           };
           rememberMatches([match]);
-          return serializeMatches([match]);
+          return filePage([match], result);
         }
         const files = rankFileMatches(result.paths, query);
-        rememberMatches(files);
-        return serializeMatches(files);
+        rememberMatches(files, fileOffset > 0);
+        return filePage(files, result);
       }
       // Window-switch mode: text prefixed with "窗口 " or "win ".
       const windowMode = input.data.match(/^(?:窗口|win)\s+(.*)$/i);
@@ -1612,6 +1856,59 @@ void app.whenReady().then(async () => {
       if (!input.data.trim()) {
         return homeMatches();
       }
+    }
+    // Dropped / pasted files: surface "转换为 X" targets first, then plugin file
+    // commands, and finally a "更多选项" entry that opens the convert window.
+    if (input.type === "files") {
+      const convertible = input.data
+        .filter((file) => file.isFile && isConvertibleFile(file.path))
+        .map((file) => file.path);
+      const matches: SearchMatch[] = [];
+      if (convertible.length > 0) {
+        let targets: Awaited<ReturnType<ConvertController["targetsFor"]>> = [];
+        try {
+          targets = await convertController.targetsFor(convertible);
+        } catch {
+          targets = [];
+        }
+        const payloadFiles = JSON.stringify(convertible);
+        let score = 1_260;
+        for (const target of targets) {
+          if (target.available === false && !target.needsDownload) continue;
+          const parts: string[] = [];
+          if (target.needsDownload) parts.push("首次使用需下载文档转换组件");
+          if (target.note) parts.push(target.note);
+          if (parts.length === 0) {
+            parts.push(convertible.length === 1 ? "输出到源文件同目录" : `转换 ${convertible.length} 个文件 · 输出到源文件同目录`);
+          }
+          matches.push({
+            id: `convert-to:${target.id}`,
+            kind: "builtin",
+            action: "convert-to",
+            title: `转换为 ${target.label}`,
+            subtitle: parts.join(" · "),
+            score,
+            payload: JSON.stringify({ files: convertible, target: target.id, needsDownload: target.needsDownload === true }),
+            iconUrl: CONVERT_ICON_URL,
+          });
+          score -= 1;
+        }
+        matches.push({
+          id: "builtin:convert",
+          kind: "builtin",
+          action: "convert",
+          title: "在文件转换窗口中打开（更多选项）",
+          subtitle: "质量、尺寸与批量设置",
+          score: 1_000,
+          payload: payloadFiles,
+          iconUrl: CONVERT_ICON_URL,
+        });
+      }
+      // Plugin "files" commands keep working behind the convert targets.
+      const pluginFileMatches = searchCommands(commands, input, 30);
+      const fileMatches = mergeMatches([matches, pluginFileMatches], 36);
+      rememberMatches(fileMatches);
+      return serializeMatches(fileMatches);
     }
     const pinnedPaths = new Set(
       pinnedAppPaths(settingsStore.get().pinnedMatches).map((item) => item.toLowerCase()),
@@ -1657,6 +1954,11 @@ void app.whenReady().then(async () => {
       usage.record(match.id);
     }
     if (match.kind === "file" || match.kind === "app") {
+      if (match.kind === "app" && isShellAppPath(match.path)) {
+        openShellApp(match.path);
+        launcher?.hide();
+        return true;
+      }
       const error = await shell.openPath(match.path);
       if (error) {
         refreshAfterOpenFailure();
@@ -1685,6 +1987,75 @@ void app.whenReady().then(async () => {
         void screenshotController.open();
         return { ok: true, hide: true };
       }
+      if (match.action === "hosts") {
+        launcher?.hide();
+        hostsController.open();
+        return { ok: true, hide: true };
+      }
+      if (match.action === "diff") {
+        launcher?.hide();
+        diffController.open();
+        return { ok: true, hide: true };
+      }
+      if (match.action === "convert-to") {
+        let files: string[] = [];
+        let target = "";
+        let needsDownload = false;
+        try {
+          const parsed = JSON.parse(match.payload ?? "{}") as {
+            files?: unknown;
+            target?: unknown;
+            needsDownload?: unknown;
+          };
+          if (Array.isArray(parsed.files)) {
+            files = parsed.files.filter((item): item is string => typeof item === "string");
+          }
+          if (typeof parsed.target === "string") target = parsed.target;
+          needsDownload = parsed.needsDownload === true;
+        } catch {
+          // Malformed payload: nothing to convert.
+        }
+        if (files.length === 0 || !target) {
+          return { action: "convert-done", ok: false, message: "转换参数无效" };
+        }
+        // Targets that need an optional download are handled in the convert
+        // window, which owns the download confirmation + progress UI.
+        if (needsDownload) {
+          launcher?.hide();
+          convertController.open(files, { target });
+          return { ok: true, hide: true };
+        }
+        // Run in-process; the renderer shows a per-row progress state while the
+        // (possibly slow) conversion runs, then a toast + open actions.
+        const result = await convertController.convertNow(files, target);
+        for (const output of result.outputs ?? []) convertedOutputs.add(path.resolve(output).toLowerCase());
+        // Office target became unavailable between listing and now: hand off to
+        // the convert window, which owns the download confirmation + progress.
+        if (!result.ok && result.needsDownload) {
+          launcher?.hide();
+          convertController.open(files, { target });
+          return { action: "convert-done", ok: true, outputs: [], needsDownload: true };
+        }
+        return {
+          action: "convert-done",
+          ok: result.ok,
+          outputs: result.outputs,
+          message: result.message,
+          needsDownload: false,
+        };
+      }
+      if (match.action === "convert") {
+        launcher?.hide();
+        let files: string[] = [];
+        try {
+          const parsed = JSON.parse(match.payload ?? "[]") as unknown;
+          if (Array.isArray(parsed)) files = parsed.filter((item): item is string => typeof item === "string");
+        } catch {
+          // Text-triggered entry carries no files.
+        }
+        convertController.open(files);
+        return { ok: true, hide: true };
+      }
       if (match.action === "focus-window") {
         launcher?.hide();
         await new Promise((resolve) => setTimeout(resolve, 80));
@@ -1706,6 +2077,11 @@ void app.whenReady().then(async () => {
       if (match.action === "plugins") {
         launcher?.webContents.send("launcher:open-settings", "plugins");
         return true;
+      }
+      if (match.action === "translate-window") {
+        launcher?.hide();
+        translateWindow.open(match.payload ?? "");
+        return { ok: true, hide: true };
       }
       const text = match.payload || clipboard.readText();
       launcher?.hide();
@@ -1747,6 +2123,21 @@ void app.whenReady().then(async () => {
         return { ok: false, message: "仅支持应用或文件" };
       }
       const original = match.path;
+      if (isShellAppPath(original)) {
+        if (action === "open") {
+          openShellApp(original);
+          return { ok: true, hide: true };
+        }
+        if (action === "copy-name") {
+          clipboard.writeText(match.title);
+          return { ok: true, message: "已复制名称" };
+        }
+        if (action === "copy-path") {
+          clipboard.writeText(original);
+          return { ok: true, message: "已复制路径" };
+        }
+        return { ok: false, message: "系统应用不支持此操作" };
+      }
       const resolved = resolveTarget(original);
       try {
         if (action === "preview") {
@@ -1907,14 +2298,45 @@ void app.whenReady().then(async () => {
       nextPinned = nextPinned.filter((item) => item.id !== matchId);
     }
     settingsStore.update({ pinnedMatches: nextPinned });
-    applications = buildApplicationIndex(
-      settingsStore.get().customLaunchItems,
-      pinnedAppPaths(settingsStore.get().pinnedMatches),
-    );
+    applications = rebuildApplications();
     return homeMatches();
   });
 
   ipcMain.on("launcher:hide", () => launcher?.hide());
+  // Files copied in Explorer land on the clipboard as CF_HDROP. Electron cannot
+  // read that list through the normal clipboard API, and — crucially —
+  // clipboard.availableFormats() does NOT report "FileNameW"/"text/uri-list"
+  // for an Explorer copy (it returns Windows-specific format names like
+  // "CF_HDROP" or nothing recognizable), so the old precheck returned [] and
+  // nothing ever pasted. We now (1) try a single-file fast path via the
+  // legacy CF_FILENAMEW buffer, then (2) always fall back to PowerShell's
+  // FileDropList without pre-filtering. powershell.exe (5.1) runs STA by
+  // default, which Get-Clipboard's FileDropList requires.
+  ipcMain.handle("launcher:clipboard-files", async (): Promise<string[]> => {
+    const fast = readClipboardFileNameW();
+    if (fast.length > 0) return fast;
+    return readClipboardFileDropList();
+  });
+
+  // Open / reveal a converted output file from the launcher result toast. Only
+  // paths produced by a launcher conversion are accepted.
+  const isConvertedOutput = (event: Electron.IpcMainInvokeEvent, filePath: unknown): filePath is string =>
+    !!launcher &&
+    event.sender === launcher.webContents &&
+    typeof filePath === "string" &&
+    convertedOutputs.has(path.resolve(filePath).toLowerCase());
+  ipcMain.handle("launcher:open-path", async (event, filePath: unknown) => {
+    if (!isConvertedOutput(event, filePath)) return { ok: false };
+    const error = await shell.openPath(filePath);
+    if (!error) launcher?.hide();
+    return error ? { ok: false, message: error } : { ok: true };
+  });
+  ipcMain.handle("launcher:reveal-path", (event, filePath: unknown) => {
+    if (!isConvertedOutput(event, filePath)) return { ok: false };
+    shell.showItemInFolder(filePath);
+    launcher?.hide();
+    return { ok: true };
+  });
   ipcMain.handle("launcher:reset-position", () => {
     settingsStore.update({ launcherPosition: null });
     if (launcher && !launcher.isDestroyed()) {
@@ -2046,6 +2468,26 @@ void app.whenReady().then(async () => {
     helper.stop();
     quitting = true;
     app.quit();
+    return;
+  }
+
+  if (ocrSmokeTestPath) {
+    try {
+      const text = await recognizeImageFile(path.resolve(ocrSmokeTestPath));
+      const compact = text.replace(/\s+/g, "").toLowerCase();
+      if (!compact.includes("helloworld") || !compact.includes("你好") || !compact.includes("世界")) {
+        throw new Error(`OCR smoke output was incomplete: ${text}`);
+      }
+      console.log(`DOCKWISP_OCR_SMOKE:${JSON.stringify({ text })}`);
+      helper.stop();
+      quitting = true;
+      app.quit();
+    } catch (error) {
+      console.error(error);
+      helper.stop();
+      quitting = true;
+      app.exit(1);
+    }
     return;
   }
 

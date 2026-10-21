@@ -12,6 +12,7 @@
     "src/main/plugin-package.ts",
     "src/main/settings.ts",
     "src/main/usage-store.ts",
+    "src/main/start-apps.ts",
     "tests/**/*.ts"
   ]
 }

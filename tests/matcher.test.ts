@@ -134,7 +134,7 @@ test("tokenize splits CamelCase and separators", () => {
   assert.ok(tokens.includes("bit"));
 });
 
-test("file ranking drops noisy paths and sorts by basename relevance", () => {
+test("file ranking keeps every unique path and sorts by basename relevance", () => {
   assert.equal(isNoisyPath("C:\\Windows\\System32\\drivers\\x.sys"), true);
   assert.equal(isNoisyPath("C:\\Users\\me\\report.pf"), true);
   assert.equal(isNoisyPath("D:\\docs\\report.pdf"), false);
@@ -147,9 +147,15 @@ test("file ranking drops noisy paths and sorts by basename relevance", () => {
     ],
     "report",
   );
-  assert.ok(ranked.every((item) => !item.path.toLowerCase().includes("\\windows\\")));
+  assert.ok(ranked.some((item) => item.path.toLowerCase().includes("\\windows\\")));
   assert.equal(ranked.filter((item) => item.path === "D:\\docs\\report.pdf").length, 1);
   assert.equal(ranked[0]?.title, "report.pdf");
+
+  const complete = rankFilePaths(
+    Array.from({ length: 75 }, (_, index) => `D:\\docs\\report-${index}.txt`),
+    "report",
+  );
+  assert.equal(complete.length, 75);
 });
 
 test("mergeMatches breaks ties by title length then locale", () => {

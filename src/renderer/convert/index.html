@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>文件转换</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M4 7l4-3 4 3M8 4v9"/><path d="M20 17l-4 3-4-3M16 20v-9"/></svg>
+        </span>
+        <div class="brand-text">
+          <div class="brand-title">文件转换</div>
+          <div class="brand-sub" id="capsLine">图片转换已内置；文档转换首次使用时需下载组件</div>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="addFiles" class="soft-button primary" type="button">添加文件</button>
+        <button id="closeWindow" class="icon-button" type="button" aria-label="关闭" title="关闭 (Esc)">
+          <svg viewBox="0 0 24 24"><path d="M6 6 L18 18 M18 6 L6 18"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main id="stage" class="stage">
+      <section id="dropzone" class="dropzone">
+        <div class="drop-inner">
+          <span class="drop-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 16V4M12 4l-4 4M12 4l4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+          </span>
+          <div class="drop-title">拖入文件，或点击“添加文件”</div>
+          <div class="drop-sub">图片（PNG / JPG / WebP / AVIF / TIFF / GIF / BMP / ICO / SVG）、文档（Word / Excel / PPT / PDF / ODF）、JSON / YAML / CSV / Markdown</div>
+        </div>
+      </section>
+
+      <ul id="fileList" class="file-list" hidden></ul>
+    </main>
+
+    <footer class="toolbar">
+      <div class="out-dir">
+        <span class="out-label">输出到</span>
+        <button id="outDir" class="chip" type="button" title="选择输出目录">源文件目录</button>
+        <button id="clearOut" class="chip-x" type="button" title="恢复默认目录" hidden>×</button>
+      </div>
+      <div class="foot-actions">
+        <span id="summary" class="summary"></span>
+        <button id="convert" class="soft-button primary big" type="button" disabled>开始转换</button>
+      </div>
+    </footer>
+
+    <div id="downloadOverlay" class="overlay" hidden>
+      <div class="overlay-card">
+        <div id="dlTitle" class="overlay-title">需要下载文档转换组件</div>
+        <div id="dlDetail" class="overlay-detail"></div>
+        <div class="overlay-progress"><div id="dlBar" class="overlay-bar"></div></div>
+        <div class="overlay-actions">
+          <button id="dlCancel" class="soft-button" type="button">暂不</button>
+          <button id="dlConfirm" class="soft-button primary" type="button">下载并安装</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" hidden></div>
+  </body>
+</html>

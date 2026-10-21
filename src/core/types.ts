@@ -116,8 +116,10 @@ export interface AppEntry {
   id: string;
   name: string;
   path: string;
-  source: "start-menu" | "desktop" | "custom";
+  source: "start-menu" | "desktop" | "custom" | "start-apps";
   isApp: boolean;
+  /** Absolute path to a pre-resolved icon (used by Start Apps entries). */
+  iconPath?: string;
   searchText: string;
   tokens: string[];
   pinyin: string;
@@ -133,6 +135,7 @@ export interface AppMatch {
   path: string;
   pinned?: boolean;
   iconUrl?: string;
+  iconPath?: string;
 }
 
 export interface FileMatch {
@@ -160,7 +163,12 @@ export interface BuiltinMatch {
     | "focus-window"
     | "window-search"
     | "screenshot"
-    | "plugins";
+    | "plugins"
+    | "hosts"
+    | "diff"
+    | "convert"
+    | "translate-window"
+    | "convert-to";
   title: string;
   subtitle: string;
   score: number;

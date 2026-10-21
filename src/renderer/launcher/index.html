@@ -18,14 +18,17 @@
           <circle cx="11" cy="11" r="7" />
           <line x1="16.4" y1="16.4" x2="21" y2="21" />
         </svg>
-        <input
-          id="query"
-          type="text"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder="Dockwisp · 搜索应用、文件或命令"
-          aria-label="搜索"
-        />
+        <div class="search-field" id="search-field">
+          <div id="file-tags" class="file-tags" hidden></div>
+          <input
+            id="query"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Dockwisp · 搜索应用、文件或命令"
+            aria-label="搜索"
+          />
+        </div>
         <button
           id="open-settings"
           class="brand-button"
@@ -181,6 +184,36 @@
           </div>
           <div id="custom-items-list" class="custom-items-list" role="list"></div>
           <div id="custom-items-empty" class="custom-items-empty">尚未添加本地应用或索引目录</div>
+        </article>
+
+        <article class="setting-card update-card full-width">
+          <div class="card-heading">
+            <span class="card-icon">⬆</span>
+            <div><h2>检查更新</h2><p>从 GitHub Release 获取最新版本</p></div>
+          </div>
+          <div class="update-row">
+            <span><strong>当前版本</strong><small id="update-current">v—</small></span>
+            <button id="check-update" class="soft-button" type="button">检查更新</button>
+          </div>
+          <div id="update-result" class="update-result" hidden>
+            <div class="update-result-head">
+              <span id="update-latest" class="update-latest"></span>
+              <span id="update-published" class="update-published"></span>
+            </div>
+            <pre id="update-notes" class="update-notes"></pre>
+            <div id="update-digest-warning" class="update-warning" hidden>
+              此版本未提供校验摘要，下载后无法验证完整性，请谨慎安装。
+            </div>
+            <div id="update-progress" class="update-progress" hidden>
+              <div class="update-progress-track"><div id="update-progress-bar" class="update-progress-bar"></div></div>
+              <span id="update-progress-label" class="update-progress-label">0%</span>
+            </div>
+            <div class="update-actions">
+              <button id="update-download" class="primary-button" type="button">下载并安装</button>
+              <button id="update-open-release" class="soft-button" type="button">查看发布页</button>
+            </div>
+          </div>
+          <div id="update-status" class="update-status" role="status"></div>
         </article>
             </div>
           </section>

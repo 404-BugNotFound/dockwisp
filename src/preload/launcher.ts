@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld("dockwisp", {
   resetPosition: () => ipcRenderer.invoke("launcher:reset-position"),
   listPlugins: () => ipcRenderer.invoke("plugins:list"),
   startScreenshot: () => ipcRenderer.send("screenshot:start"),
+  openBuiltin: (id: string) => ipcRenderer.send("builtin:open", id),
   dragStart: (screenX: number, screenY: number) =>
     ipcRenderer.send("launcher:drag-start", screenX, screenY),
   dragMove: (screenX: number, screenY: number) =>
@@ -34,10 +35,20 @@ contextBridge.exposeInMainWorld("dockwisp", {
     action: "open" | "reveal" | "copy-path" | "copy-name" | "run-as-admin" | "preview",
   ) => ipcRenderer.invoke("launcher:item-action", id, action),
   pathsForFiles: (files: File[]) => files.map((file) => webUtils.getPathForFile(file)),
+  clipboardFiles: () => ipcRenderer.invoke("launcher:clipboard-files"),
+  openPath: (filePath: string) => ipcRenderer.invoke("launcher:open-path", filePath),
+  revealPath: (filePath: string) => ipcRenderer.invoke("launcher:reveal-path", filePath),
   onFocus: (callback: (point?: { x: number; y: number }) => void) =>
     ipcRenderer.on("launcher:focus", (_event, point) => callback(point)),
   onOpenSettings: (callback: (page?: string) => void) =>
     ipcRenderer.on("launcher:open-settings", (_event, page) => callback(page)),
   onIndexUpdated: (callback: () => void) =>
     ipcRenderer.on("launcher:index-updated", callback),
+  checkUpdate: () => ipcRenderer.invoke("updater:check"),
+  downloadUpdate: (payload: unknown) => ipcRenderer.invoke("updater:download", payload),
+  installUpdate: (installerPath?: string) =>
+    ipcRenderer.invoke("updater:install", installerPath),
+  openReleasePage: () => ipcRenderer.invoke("updater:open-release"),
+  onUpdateProgress: (callback: (progress: { received: number; total: number }) => void) =>
+    ipcRenderer.on("updater:progress", (_event, progress) => callback(progress)),
 });

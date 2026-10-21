@@ -1,0 +1,24 @@
+export const OCR_MODEL_REVISION = "bf1d5edb0335d3262be7caf13f766ba274b4cadd";
+export const OCR_MODEL_BASE =
+  `https://huggingface.co/snowfluke/ppu-paddle-ocr-models/resolve/${OCR_MODEL_REVISION}`;
+
+export const OCR_MODEL_FILES = [
+  {
+    name: "PP-OCRv5_mobile_det_infer.onnx",
+    source: "detection/PP-OCRv5_mobile_det_infer.onnx",
+    bytes: 4_748_769,
+    sha256: "d7fe3ea74652890722c0f4d02458b7261d9f5ae6c92904d05707c9eb155c7924",
+  },
+  {
+    name: "PP-OCRv5_server_rec_infer.onnx",
+    source: "recognition/PP-OCRv5_server_rec_infer.onnx",
+    bytes: 84_176_681,
+    sha256: "c8cff87fd83a76b97178250653924598593088c6bb71b2d2d942ef13b9a2d2ec",
+  },
+  {
+    name: "ppocrv5_dict.txt",
+    source: "recognition/ppocrv5_dict.txt",
+    bytes: 74_014,
+    sha256: "9dfc80c50b6cb07399a47a7cf25d11db475fb4ad0e1fc96b2eff6467c8166ff3",
+  },
+];

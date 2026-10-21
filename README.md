@@ -10,7 +10,7 @@
 
 - 统一搜索应用、文件和 Windows 系统工具
 - 基于 Everything 的全盘文件搜索，支持便携版与本地索引回退
-- 截图、标注、OCR 与划词翻译
+- 截图、标注、离线 PP-OCRv5 中英文字识别与划词翻译
 - 图片、文本、音视频及 PDF 预览
 - 计算器、单位换算和常用文本工具
 - 主题、结果固定与插件扩展
@@ -35,7 +35,11 @@ npm test
 npm start
 ```
 
-本地构建前，请按照 `native/sdk/README.md` 和 `native/portable/README.md` 放置 Everything SDK 与便携版所需的第三方二进制。
+本地构建前，请按照 `native/sdk/README.md` 和 `native/portable/README.md` 放置 Everything SDK 与便携版所需的第三方二进制，并准备固定版本的本地 OCR 模型：
+
+```powershell
+npm run fetch:ocr-models
+```
 
 ```powershell
 npm run build
