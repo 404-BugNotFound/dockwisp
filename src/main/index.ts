@@ -1571,12 +1571,15 @@ void app.whenReady().then(async () => {
     }));
   };
 
-  const spawnDetached = (command: string, args: string[]): void => {
+  const spawnDetached = (command: string, args: string[], showWindow = false): void => {
     try {
+      // windowsHide passes SW_HIDE to the child, and GUI tools that relaunch
+      // themselves (resmon.exe -> perfmon.exe /res) inherit it and stay
+      // invisible; user-facing tools must therefore be spawned visibly.
       const child = spawn(command, args, {
         detached: true,
         stdio: "ignore",
-        windowsHide: true,
+        windowsHide: !showWindow,
       });
       child.on("error", () => undefined);
       child.unref();
@@ -1598,7 +1601,7 @@ void app.whenReady().then(async () => {
           const error = await shell.openPath(run.target);
           if (error) throw new Error(error);
         } else {
-          spawnDetached(run.target, run.args ?? []);
+          spawnDetached(run.target, run.args ?? [], true);
         }
         launcher?.hide();
       } catch {
@@ -1635,7 +1638,7 @@ void app.whenReady().then(async () => {
         await helper.media("down").catch(() => undefined);
         return;
       case "taskmgr":
-        spawnDetached("taskmgr.exe", []);
+        spawnDetached("taskmgr.exe", [], true);
         launcher?.hide();
         return;
       case "settings":
@@ -1643,7 +1646,7 @@ void app.whenReady().then(async () => {
         launcher?.hide();
         return;
       case "explorer":
-        spawnDetached("explorer.exe", []);
+        spawnDetached("explorer.exe", [], true);
         launcher?.hide();
         return;
       case "shutdown":
@@ -1930,8 +1933,19 @@ void app.whenReady().then(async () => {
         ? searchApps(applications, input.data, { limit: 60, pinnedPaths })
         : [];
     const tools = await toolMatches(input, currency);
+    const builtins = builtinMatches(input);
+    // A built-in system command (for example 资源监视器) supersedes an indexed
+    // Start Menu app of the same name, so the tool is not listed twice.
+    const systemTitles = new Set(
+      builtins
+        .filter((match) => match.action === "system")
+        .map((match) => match.title.trim().toLowerCase()),
+    );
+    const visibleApps = appMatches.filter(
+      (match) => !systemTitles.has(match.title.trim().toLowerCase()),
+    );
     const merged = mergeMatches(
-      [tools, builtinMatches(input), pluginMatches, appMatches],
+      [tools, builtins, pluginMatches, visibleApps],
       36,
     );
     // Uniformly flag any pinned id and apply a modest boost. Apps already carry
