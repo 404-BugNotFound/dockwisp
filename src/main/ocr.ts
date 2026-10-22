@@ -3,7 +3,10 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 
 const OCR_TIMEOUT_MS = 90_000;
-const OCR_IDLE_TIMEOUT_MS = 10 * 60_000;
+// Idle time after the last recognition before the worker is recycled to free
+// ONNX Runtime arena memory (a primed worker holds ~450-700 MB, a fresh one
+// with only models loaded ~250 MB).
+const OCR_RECYCLE_IDLE_MS = 5 * 60_000;
 const OCR_MAX_UPSCALED_SIDE = 1_920;
 const OCR_UPSCALE_THRESHOLD = 1_400;
 const OCR_MODEL_FILES = [
@@ -27,6 +30,7 @@ interface OcrWorkerRecognizeRequest {
 
 interface OcrWorkerWarmupRequest {
   type: "warmup";
+  imagePath?: string;
 }
 
 type OcrWorkerRequest = OcrWorkerRecognizeRequest | OcrWorkerWarmupRequest;
@@ -102,14 +106,20 @@ class PaddleOcrClient {
   private starting: Promise<UtilityProcess> | null = null;
   private nextId = 1;
   private pending = new Map<number, PendingOcrRequest>();
-  private idleTimer: NodeJS.Timeout | null = null;
+  // The worker stays resident for the app's lifetime: a cold start (process
+  // spawn + model load) is what made the first OCR after a pause slow. After
+  // a period of inactivity it is recycled into a fresh process (models loaded,
+  // not yet primed) to release ONNX Runtime arena memory.
+  private warmed = false;
+  private primed = false;
+  private recycleTimer: NodeJS.Timeout | null = null;
   private lifecycleRegistered = false;
 
   async recognize(imagePath: string): Promise<string> {
     if (!existsSync(imagePath)) throw new Error(`OCR 图片不存在：${imagePath}`);
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = null;
+    this.cancelRecycle();
     const worker = await this.ensureWorker();
+    this.primed = true;
     const id = this.nextId++;
     return new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -128,7 +138,11 @@ class PaddleOcrClient {
     });
   }
 
-  warmup(): void {
+  /**
+   * Make sure the worker is running with models loaded. With `prime`, also
+   * run one throwaway recognition so ONNX Runtime kernels and arenas are hot.
+   */
+  warmup(prime: boolean): void {
     try {
       const modelDirectory = resolveModelDirectory();
       if (OCR_MODEL_FILES.some((name) => !existsSync(path.join(modelDirectory, name)))) {
@@ -137,22 +151,53 @@ class PaddleOcrClient {
     } catch {
       return;
     }
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = null;
+    const alreadyRunning = this.worker !== null && this.worker.pid !== undefined;
+    if (alreadyRunning && this.warmed && (!prime || this.primed)) return;
     this.ensureWorker().then(
       (worker) => {
         try {
-          const request: OcrWorkerWarmupRequest = { type: "warmup" };
+          const imagePath = path.join(__dirname, "ocr-warmup.png");
+          const request: OcrWorkerWarmupRequest = {
+            type: "warmup",
+            ...(prime && existsSync(imagePath) ? { imagePath } : {}),
+          };
           worker.postMessage(request);
+          this.warmed = true;
+          if (prime) {
+            this.primed = true;
+            this.scheduleRecycle();
+          }
         } catch {
           // Ignore: a failed warmup must never affect pending requests.
         }
-        if (this.pending.size === 0) this.scheduleIdleStop();
       },
       () => {
         // Ignore worker start failures; recognize() will surface real errors.
       },
     );
+  }
+
+  private cancelRecycle(): void {
+    if (this.recycleTimer) clearTimeout(this.recycleTimer);
+    this.recycleTimer = null;
+  }
+
+  private scheduleRecycle(): void {
+    this.cancelRecycle();
+    this.recycleTimer = setTimeout(() => this.recycle(), OCR_RECYCLE_IDLE_MS);
+    this.recycleTimer.unref();
+  }
+
+  /** Replace an idle, primed worker with a fresh one that only loads models. */
+  private recycle(): void {
+    this.recycleTimer = null;
+    if (!this.primed || !this.worker) return;
+    if (this.pending.size > 0) {
+      this.scheduleRecycle();
+      return;
+    }
+    this.stop();
+    this.warmup(false);
   }
 
   private ensureWorker(): Promise<UtilityProcess> {
@@ -201,14 +246,15 @@ class PaddleOcrClient {
     this.pending.delete(response.id);
     if (response.ok) pending.resolve(normalizeOcrText(response.text ?? ""));
     else pending.reject(new Error(response.error || "文字识别失败"));
-    this.scheduleIdleStop();
+    if (this.pending.size === 0) this.scheduleRecycle();
   }
 
   private handleExit(child: UtilityProcess, code: number): void {
     if (this.worker !== child) return;
     this.worker = null;
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = null;
+    this.warmed = false;
+    this.primed = false;
+    this.cancelRecycle();
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error(`OCR 进程已退出（代码 ${code}）`));
@@ -216,17 +262,12 @@ class PaddleOcrClient {
     this.pending.clear();
   }
 
-  private scheduleIdleStop(): void {
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => this.stop(), OCR_IDLE_TIMEOUT_MS);
-    this.idleTimer.unref();
-  }
-
   private stop(): void {
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = null;
+    this.cancelRecycle();
     this.worker?.kill();
     this.worker = null;
+    this.warmed = false;
+    this.primed = false;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error("OCR 进程已停止"));
@@ -243,10 +284,12 @@ export function recognizeImageFile(imagePath: string): Promise<string> {
 }
 
 /**
- * Pre-start the OCR worker and load the models so the first recognition is
- * fast. Idempotent and never throws: missing models return silently. Resets
- * the idle timer, so the worker exits after OCR_IDLE_TIMEOUT_MS if unused.
+ * Keep the resident OCR worker ready. `prime` (used when the screenshot
+ * overlay opens) also runs one throwaway recognition so the user's first real
+ * recognition is fast; without it (app startup) only the models are loaded.
+ * Idempotent and never throws: missing models return silently; a crashed
+ * worker is restarted.
  */
-export function warmupOcr(): void {
-  paddleOcr.warmup();
+export function warmupOcr(prime = true): void {
+  paddleOcr.warmup(prime);
 }

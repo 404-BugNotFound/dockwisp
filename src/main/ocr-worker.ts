@@ -13,6 +13,8 @@ interface OcrWorkerRecognizeRequest {
 
 interface OcrWorkerWarmupRequest {
   type: "warmup";
+  // Optional small sample image used for a one-off priming recognition.
+  imagePath?: string;
 }
 
 type OcrWorkerRequest = OcrWorkerRecognizeRequest | OcrWorkerWarmupRequest;
@@ -29,6 +31,7 @@ const parentPort = process.parentPort;
 if (!parentPort) throw new Error("OCR worker requires an Electron parent port");
 
 let servicePromise: Promise<PaddleOcrServiceType> | null = null;
+let primed = false;
 let queue = Promise.resolve();
 
 function modelPath(name: string): string {
@@ -107,9 +110,21 @@ async function recognize(request: OcrWorkerRecognizeRequest): Promise<void> {
 parentPort.on("message", (event) => {
   const request = event.data as Partial<OcrWorkerRequest>;
   if (request.type === "warmup") {
+    const warmupImagePath = (request as Partial<OcrWorkerWarmupRequest>).imagePath;
     queue = queue.then(async () => {
       try {
-        await getService();
+        const service = await getService();
+        // A throwaway recognition primes ONNX Runtime kernels and memory arenas
+        // so the user's first real recognition does not pay for them.
+        if (typeof warmupImagePath === "string" && !primed) {
+          primed = true;
+          const image = await readFile(warmupImagePath);
+          const arrayBuffer = image.buffer.slice(
+            image.byteOffset,
+            image.byteOffset + image.byteLength,
+          ) as ArrayBuffer;
+          await service.recognize(arrayBuffer, { noCache: true });
+        }
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         process.stderr.write(`OCR warmup failed: ${detail}\n`);

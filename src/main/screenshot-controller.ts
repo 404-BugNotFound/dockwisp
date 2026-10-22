@@ -9,7 +9,7 @@ import {
   nativeImage,
   screen,
 } from "electron";
-import { readFile, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -33,9 +33,62 @@ interface ScreenshotState {
 // was already hidden (the common hotkey path), which is the main latency win.
 const HIDE_DELAY_MS = 80;
 const DATA_URL_PREFIX = /^data:image\/[a-z.+-]+;base64,/i;
+// After show(), how long to wait for the renderer to confirm it painted a frame
+// before moving the overlay on-screen anyway.
+const PAINT_TIMEOUT_MS = 250;
+
+/** A position to the right of every display, so a shown window is not visible. */
+function offscreenOrigin(): { x: number; y: number } {
+  const displays = screen.getAllDisplays();
+  const right = Math.max(...displays.map((item) => item.bounds.x + item.bounds.width));
+  const top = Math.min(...displays.map((item) => item.bounds.y));
+  return { x: right + 200, y: top };
+}
 
 const wait = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const TIMING_LOG_MAX_BYTES = 256 * 1024;
+
+/**
+ * Per-capture stage timings, appended as one line to
+ * `<userData>/logs/screenshot-timing.log` to diagnose slow opens (e.g. after
+ * the app has been idle and Windows paged it out).
+ */
+class CaptureTiming {
+  private readonly start = performance.now();
+  private last = this.start;
+  private readonly stages: string[] = [];
+
+  constructor(private readonly previousOpenAt: number) {}
+
+  mark(stage: string): void {
+    const now = performance.now();
+    this.stages.push(`${stage}=${Math.round(now - this.last)}`);
+    this.last = now;
+  }
+
+  write(detail: string): void {
+    const idleSeconds = this.previousOpenAt
+      ? Math.round((Date.now() - this.previousOpenAt) / 1000)
+      : -1;
+    const line =
+      `${new Date().toISOString()} total=${Math.round(performance.now() - this.start)}ms ` +
+      `idle=${idleSeconds}s ${this.stages.join(" ")} ${detail}\n`;
+    const directory = path.join(app.getPath("userData"), "logs");
+    const file = path.join(directory, "screenshot-timing.log");
+    void (async () => {
+      try {
+        await mkdir(directory, { recursive: true });
+        const info = await stat(file).catch(() => null);
+        if (info && info.size > TIMING_LOG_MAX_BYTES) await rename(file, `${file}.1`);
+        await appendFile(file, line);
+      } catch {
+        // Diagnostics must never affect screenshots.
+      }
+    })();
+  }
+}
 
 /** Zero-padded two-character number for the save-dialog default filename. */
 function pad(value: number): string {
@@ -67,6 +120,7 @@ export class ScreenshotController {
   private overlayLoaded: Promise<void> | null = null;
   private hotkey = "";
   private revealOverlay: (() => void) | null = null;
+  private placeOverlay: (() => void) | null = null;
   private revealTimer: NodeJS.Timeout | null = null;
   // Guards against overlapping captures when the hotkey is pressed repeatedly.
   private captureToken = 0;
@@ -75,6 +129,7 @@ export class ScreenshotController {
   // Path of the native BMP temp file backing the current capture, or null when
   // the desktopCapturer data-URL fallback was used.
   private currentShotPath: string | null = null;
+  private lastOpenAt = 0;
 
   constructor(
     private readonly launcher: BrowserWindow,
@@ -98,6 +153,8 @@ export class ScreenshotController {
     } catch {
       // Best-effort warmup; capture() will retry on demand.
     }
+    // The OCR worker is resident; load its models once at startup.
+    warmupOcr(false);
   }
 
   /** Register the global screenshot hotkey; returns it on success, "" on failure. */
@@ -203,6 +260,11 @@ export class ScreenshotController {
   }
 
   private async capture(token: number): Promise<void> {
+    const timing = new CaptureTiming(this.lastOpenAt);
+    this.lastOpenAt = Date.now();
+    // No-op when the resident worker is already warm; restarts it if it died.
+    warmupOcr();
+
     // If an overlay is already on screen (repeated trigger), reset it first so
     // we never capture a previous overlay or stack stale state.
     if (this.overlay && !this.overlay.isDestroyed() && this.overlay.isVisible()) {
@@ -217,23 +279,34 @@ export class ScreenshotController {
       // from the capture; the hidden-launcher hotkey path skips this entirely.
       await wait(HIDE_DELAY_MS);
       if (token !== this.captureToken) return;
+      timing.mark("hideLauncher");
     }
 
     const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     const capture = await this.captureDisplay(display);
     if (token !== this.captureToken) return;
+    timing.mark(capture.tainted ? "captureGdi" : "captureFallback");
 
+    const overlayExisted = !!this.overlay && !this.overlay.isDestroyed();
     const overlay = this.ensureOverlay();
     await this.overlayLoaded;
     if (token !== this.captureToken || overlay.isDestroyed()) return;
+    timing.mark(overlayExisted ? "overlayReused" : "overlayCreated");
 
-    // Move/resize the hidden window onto the target display before showing.
-    overlay.setBounds({
+    // Keep the window hidden until the renderer has decoded + painted the new
+    // image, so the user never sees a blank overlay or a stale previous frame.
+    // It is then shown off-screen first: Chromium only presents a fresh frame
+    // once the window is visible, and showing it in place would flash the
+    // black window background for a frame. After that frame is painted the
+    // window is moved on-screen and the renderer fades the dim layer in.
+    const onscreen = {
       x: display.bounds.x,
       y: display.bounds.y,
       width: display.bounds.width,
       height: display.bounds.height,
-    });
+    };
+    const offscreen = { ...onscreen, ...offscreenOrigin() };
+    overlay.setBounds(offscreen);
     overlay.setAlwaysOnTop(true, "screen-saver");
     this.blurCloseArmed = false;
     this.suppressBlurClose = false;
@@ -246,20 +319,21 @@ export class ScreenshotController {
       tainted: capture.tainted,
     };
 
-    // Keep the window hidden until the renderer has decoded + painted the new
-    // image, so the user never sees a blank overlay or a stale previous frame.
-    // The renderer sends `screenshot:ready`; the timer is a safety net.
-    let revealed = false;
-    const reveal = (): void => {
-      if (revealed || overlay.isDestroyed() || token !== this.captureToken) return;
-      revealed = true;
+    let placed = false;
+    const place = (timedOut: boolean): void => {
+      if (placed || overlay.isDestroyed() || token !== this.captureToken) return;
+      placed = true;
+      timing.mark(timedOut ? "paintTimeout" : "painted");
       if (this.revealTimer) {
         clearTimeout(this.revealTimer);
         this.revealTimer = null;
       }
-      this.revealOverlay = null;
-      overlay.show();
+      this.placeOverlay = null;
+      overlay.setBounds(onscreen);
       overlay.focus();
+      overlay.webContents.send("screenshot:revealed");
+      timing.mark("shown");
+      timing.write(`${capture.width}x${capture.height}`);
       // A background process may not be allowed to take the foreground from a
       // global hotkey; ask the native helper to activate the overlay.
       if (this.helper) {
@@ -272,13 +346,24 @@ export class ScreenshotController {
       setTimeout(() => {
         if (this.overlay === overlay && !overlay.isDestroyed()) this.blurCloseArmed = true;
       }, 400);
-      // Warm the OCR worker only after the overlay is on screen, so loading the
-      // model does not compete for CPU with capture and first paint.
-      setTimeout(() => warmupOcr(), 300);
     };
-    this.revealOverlay = reveal;
+
+    let revealed = false;
+    const reveal = (timedOut: boolean): void => {
+      if (revealed || overlay.isDestroyed() || token !== this.captureToken) return;
+      revealed = true;
+      timing.mark(timedOut ? "readyTimeout" : "rendererReady");
+      if (this.revealTimer) clearTimeout(this.revealTimer);
+      this.revealOverlay = null;
+      overlay.show();
+      this.placeOverlay = () => place(false);
+      overlay.webContents.send("screenshot:shown");
+      this.revealTimer = setTimeout(() => place(true), PAINT_TIMEOUT_MS);
+    };
+    this.revealOverlay = () => reveal(false);
     overlay.webContents.send("screenshot:state", state);
-    this.revealTimer = setTimeout(reveal, 1_000);
+    timing.mark("stateSent");
+    this.revealTimer = setTimeout(() => reveal(true), 1_000);
   }
 
   /**
@@ -342,6 +427,7 @@ export class ScreenshotController {
   /** Hide the overlay and reset the renderer's state without destroying it. */
   private resetOverlay(): void {
     this.revealOverlay = null;
+    this.placeOverlay = null;
     this.blurCloseArmed = false;
     this.suppressBlurClose = false;
     if (this.revealTimer) {
@@ -383,6 +469,10 @@ export class ScreenshotController {
 
     ipcMain.on("screenshot:ready", (event) => {
       if (this.fromOverlay(event)) this.revealOverlay?.();
+    });
+
+    ipcMain.on("screenshot:painted", (event) => {
+      if (this.fromOverlay(event)) this.placeOverlay?.();
     });
 
     ipcMain.handle("screenshot:image-bytes", async (event) => {
@@ -447,8 +537,12 @@ export class ScreenshotController {
         ? image.resize({ ...resized, quality: "best" })
         : image;
       await writeFile(temporary, ocrImage.toPNG());
+      const timing = new CaptureTiming(0);
       try {
-        return await recognizeImageFile(temporary);
+        const text = await recognizeImageFile(temporary);
+        timing.mark("ocr");
+        timing.write(`ocr ${size.width}x${size.height} chars=${text.length}`);
+        return text;
       } finally {
         await unlink(temporary).catch(() => undefined);
       }

@@ -1,6 +1,9 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
+import { diagLog } from "./diag-log";
+
+const log = (message: string): void => diagLog("everything", message);
 
 export type FileSearchStatus = "ok" | "indexing" | "error" | "fallback";
 export type FileSearchProvider = "system" | "portable" | "fallback";
@@ -81,14 +84,19 @@ export class FileSearch {
       // An Everything instance that is already running (e.g. the user's own
       // installation in the tray) is reused as-is; never start a second one.
       if (await this.isEverythingRunning()) return;
-      await this.startProvider();
-    } catch {
+      await this.startProvider("warmUp");
+    } catch (error) {
+      log(`warmUp failed: ${(error as Error).message}`);
       // Ignore: the first query will retry via the normal path.
     }
   }
 
   private async isEverythingRunning(): Promise<boolean> {
     const status = await this.runHelper("--status");
+    log(
+      `status=${JSON.stringify(status)} installed=${this.installedPath ?? "unknown/none"} ` +
+        `portable=${existsSync(this.portablePath) ? this.portablePath : "missing"}`,
+    );
     return status?.ipc === true;
   }
 
@@ -117,6 +125,7 @@ export class FileSearch {
       return Promise.resolve(null);
     this.installedLookup ??= this.locateInstalledEverything().then((found) => {
       this.installedPath = found;
+      log(`installed Everything lookup: ${found ?? "none"}`);
       return found;
     });
     return this.installedLookup;
@@ -168,7 +177,8 @@ export class FileSearch {
     // IPC unavailable: Everything is not running. Try to start a provider.
     if (helper.ipc === false) {
       if (!this.providerStarted) {
-        if (await this.startProvider()) {
+        log(`query found no Everything IPC: ${JSON.stringify(helper)}`);
+        if (await this.startProvider("query")) {
           return this.indexingResult("starting");
         }
         this.clearIndexingProgress();
@@ -256,7 +266,7 @@ export class FileSearch {
    * no provider could be started (e.g. portable exe missing), so the caller can
    * fall back to the bounded index.
    */
-  private async startProvider(): Promise<boolean> {
+  private async startProvider(reason: string): Promise<boolean> {
     const now = Date.now();
     if (this.providerStarted && now - this.providerStartedAt < RESTART_INTERVAL_MS) {
       // Already started recently; treat as in-progress so the caller polls.
@@ -267,20 +277,26 @@ export class FileSearch {
     const executable = installed ?? this.portablePath;
     const provider: FileSearchProvider = installed ? "system" : "portable";
 
-    if (!existsSync(executable)) return false;
+    if (!existsSync(executable)) {
+      log(`startProvider(${reason}) skipped: ${executable} missing`);
+      return false;
+    }
 
     const args = installed
       ? ["-minimized", "-startup"]
       : ["-config", this.configPath, "-db", this.dbPath, "-minimized", "-startup"];
 
+    log(`startProvider(${reason}) spawn ${provider}: "${executable}" ${args.join(" ")}`);
     try {
       const child = spawn(executable, args, {
         detached: true,
         stdio: "ignore",
         windowsHide: true,
       });
+      child.on("error", (error) => log(`startProvider spawn error: ${error.message}`));
       child.unref();
-    } catch {
+    } catch (error) {
+      log(`startProvider spawn threw: ${(error as Error).message}`);
       return false;
     }
 
@@ -297,7 +313,15 @@ export class FileSearch {
   async stopPortable(timeoutMs = 4_000): Promise<void> {
     // "-exit" targets whichever Everything instance is running, so only send it
     // when no system Everything exists (then the running one must be ours).
-    if (!existsSync(this.portablePath) || (await this.installedEverything())) return;
+    const installed = await this.installedEverything();
+    if (!existsSync(this.portablePath) || installed) {
+      log(
+        `stopPortable skipped: portable=${existsSync(this.portablePath) ? "present" : "missing"} ` +
+          `installed=${installed ?? "none"}`,
+      );
+      return;
+    }
+    log(`stopPortable: "${this.portablePath}" -config "${this.configPath}" -exit`);
     await new Promise<void>((resolve) => {
       try {
         const child = spawn(this.portablePath, ["-config", this.configPath, "-exit"], {
@@ -305,16 +329,19 @@ export class FileSearch {
           windowsHide: true,
         });
         const timer = setTimeout(() => {
+          log("stopPortable timed out; killing -exit process");
           child.kill();
           resolve();
         }, timeoutMs);
-        const done = () => {
+        const done = (detail: string) => {
           clearTimeout(timer);
+          log(`stopPortable finished: ${detail}`);
           resolve();
         };
-        child.on("error", done);
-        child.on("close", done);
-      } catch {
+        child.on("error", (error) => done(`error ${error.message}`));
+        child.on("close", (code) => done(`exit ${code}`));
+      } catch (error) {
+        log(`stopPortable threw: ${(error as Error).message}`);
         resolve();
       }
     });

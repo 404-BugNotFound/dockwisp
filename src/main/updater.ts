@@ -9,6 +9,7 @@ import {
   type ReleaseJson,
   type UpdateInfo,
 } from "../core/version";
+import { diagLog } from "./diag-log";
 
 // GitHub Release 来源（固定仓库）。
 const RELEASES_API =
@@ -250,8 +251,11 @@ async function handleInstall(
 
   try {
     // 通知主进程进入退出流程，并结束会锁住安装目录文件的子进程。
+    diagLog("updater", `install start: ${installer} (current ${app.getVersion()})`);
     await options.onBeforeInstall();
+    diagLog("updater", "onBeforeInstall done");
   } catch (error) {
+    diagLog("updater", `onBeforeInstall failed: ${(error as Error).message}`);
     return { ok: false, message: `安装前准备失败：${(error as Error).message}` };
   }
 
@@ -263,7 +267,9 @@ async function handleInstall(
       stdio: "ignore",
     });
     child.unref();
+    diagLog("updater", `installer spawned pid=${child.pid ?? "?"}`);
   } catch (error) {
+    diagLog("updater", `installer spawn failed: ${(error as Error).message}`);
     return { ok: false, message: `启动安装程序失败：${(error as Error).message}` };
   }
 

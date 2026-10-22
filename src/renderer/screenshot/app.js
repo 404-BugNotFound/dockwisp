@@ -9,6 +9,9 @@ const api = window.screenshot || {
   // 开发/自检时的降级桩，真实环境由 preload 注入。
   onState() {},
   onReset() {},
+  onShown() {},
+  onRevealed() {},
+  painted() {},
   close() {},
   ready() {},
   async imageBytes() { return null; },
@@ -142,6 +145,25 @@ api.onState((state) => {
     });
 });
 
+// 窗口已在屏幕外显示：等两帧确保新画面已真正提交，再让主进程移回屏幕内，避免黑帧。
+api.onShown(() => {
+  let sent = false;
+  const fire = () => {
+    if (sent) return;
+    sent = true;
+    api.painted();
+  };
+  requestAnimationFrame(() => requestAnimationFrame(fire));
+  setTimeout(fire, 120);
+});
+
+// 移回屏幕内后：遮罩从透明淡入，营造“压暗”的启动动画（截图本身不动，保持所见即所得）。
+api.onRevealed(() => {
+  requestAnimationFrame(() => {
+    root.dataset.entering = "false";
+  });
+});
+
 // 关闭时主进程通知渲染器彻底重置，为下次复用做准备。
 api.onReset(() => {
   stateToken += 1;
@@ -174,6 +196,7 @@ function resetAll() {
   pointer.draft = null;
 
   // DOM 复位。
+  root.dataset.entering = "true";
   root.dataset.mode = "idle";
   root.dataset.toolActive = "false";
   root.dataset.hasSelection = "false";

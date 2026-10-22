@@ -50,6 +50,7 @@ import { TranslateWindowController } from "./translate-window-controller";
 import { isShellAppPath } from "../core/start-apps";
 import { loadCachedStartApps, openShellApp, refreshStartApps } from "./start-apps";
 import { registerUpdater } from "./updater";
+import { diagLog } from "./diag-log";
 import { HostsController } from "./hosts-controller";
 import { DiffController } from "./diff-controller";
 import { ConvertController } from "./convert-controller";
@@ -1450,6 +1451,10 @@ void app.whenReady().then(async () => {
   const currency = new CurrencyRates(app.getPath("userData"));
   const usage = new UsageStore(path.join(app.getPath("userData"), "usage.json"));
 
+  diagLog(
+    "everything",
+    `app start v${app.getVersion()} packaged=${app.isPackaged} argv=${JSON.stringify(process.argv.slice(1))}`,
+  );
   const fileSearch = new FileSearch(
     FileSearch.resolveExecutable(app.isPackaged, process.resourcesPath),
     FileSearch.resolvePortable(app.isPackaged, process.resourcesPath),

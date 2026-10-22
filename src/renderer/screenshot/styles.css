@@ -66,6 +66,19 @@ body {
   pointer-events: none;
 }
 
+/* 启动动画：遮罩与提示从透明淡入（截图本身保持不动） */
+#dim,
+.mask,
+#hint {
+  transition: opacity 140ms ease-out;
+}
+#root[data-entering="true"] #dim,
+#root[data-entering="true"] .mask,
+#root[data-entering="true"] #hint {
+  opacity: 0;
+  transition: none;
+}
+
 /* 无选区时整屏暗化 */
 #dim {
   position: absolute;
