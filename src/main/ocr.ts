@@ -11,8 +11,8 @@ const OCR_MAX_UPSCALED_SIDE = 1_920;
 const OCR_UPSCALE_THRESHOLD = 1_400;
 const OCR_MODEL_FILES = [
   "PP-OCRv5_mobile_det_infer.onnx",
-  "PP-OCRv5_mobile_rec_infer.onnx",
-  "ppocrv5_dict.txt",
+  "PP-OCRv6_small_rec.ort",
+  "ppocrv6_dict.txt",
 ] as const;
 
 // Matches a single CJK character (unified ideographs, common punctuation and

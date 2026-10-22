@@ -10,15 +10,15 @@ export const OCR_MODEL_FILES = [
     sha256: "d7fe3ea74652890722c0f4d02458b7261d9f5ae6c92904d05707c9eb155c7924",
   },
   {
-    name: "PP-OCRv5_mobile_rec_infer.onnx",
-    source: "recognition/PP-OCRv5_mobile_rec_infer.onnx",
-    bytes: 16_559_278,
-    sha256: "d253c3cbee6e507828a5271a30ab0ec8ae7c2a99d0cc8e6f844fe380809d22b3",
+    name: "PP-OCRv6_small_rec.ort",
+    source: "recognition/ort/PP-OCRv6_small_rec.ort",
+    bytes: 21_290_816,
+    sha256: "40bccd9fa3ae2d14d724bf9d020c8f0edfc801489477b92f7449162a538366df",
   },
   {
-    name: "ppocrv5_dict.txt",
-    source: "recognition/ppocrv5_dict.txt",
-    bytes: 74_014,
-    sha256: "9dfc80c50b6cb07399a47a7cf25d11db475fb4ad0e1fc96b2eff6467c8166ff3",
+    name: "ppocrv6_dict.txt",
+    source: "recognition/ppocrv6_dict.txt",
+    bytes: 74_948,
+    sha256: "41557512862dfe31970cf22407742b629725461dd84c0d8771bde9c87c2202c8",
   },
 ];

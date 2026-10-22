@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
+import { copyFile, mkdir, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { diagLog } from "./diag-log";
 
@@ -48,6 +49,12 @@ export const FILE_SEARCH_PAGE_SIZE = 100;
  * to a bounded common-folder index. Building the very first index can take
  * several minutes; during that time queries report an "indexing" status and the
  * renderer polls until results are available.
+ *
+ * The portable Everything is never executed from its bundled location under
+ * `resources`: the installer may overwrite that copy during an update. Instead
+ * it is synced once into a writable directory (`portablePath`) and always run
+ * from there, so an in-app update can replace the bundled source without having
+ * to stop a running Everything.
  */
 export class FileSearch {
   private fallbackIndex: string[] | null = null;
@@ -65,6 +72,7 @@ export class FileSearch {
     private readonly configPath: string,
     private readonly dbPath: string,
     private readonly getFallbackRoots: () => string[],
+    private readonly bundledPortableDir?: string,
   ) {}
 
   /** Invalidate the cached fallback index so the next query rebuilds it. */
@@ -277,6 +285,12 @@ export class FileSearch {
     const executable = installed ?? this.portablePath;
     const provider: FileSearchProvider = installed ? "system" : "portable";
 
+    // The portable Everything is only ever run from its writable copy, which we
+    // sync from the bundled source first. Reaching here with provider=portable
+    // means Everything is not already running (the caller saw ipc=false), so the
+    // copy is safe to overwrite.
+    if (provider === "portable") await this.syncPortable();
+
     if (!existsSync(executable)) {
       log(`startProvider(${reason}) skipped: ${executable} missing`);
       return false;
@@ -307,45 +321,73 @@ export class FileSearch {
   }
 
   /**
-   * Ask the bundled portable Everything to exit so an installer can replace its
-   * executable. A system-installed Everything is never touched.
+   * Ensure the writable portable Everything copy (`portablePath` and its
+   * `Everything.lng`) matches the bundled source under `resources`. Copies only
+   * when a file is missing or differs (size or mtime), using a temp file plus
+   * rename inside the target directory so a running Everything never sees a
+   * half-written exe. Best-effort: never throws, so a copy failure cannot break
+   * startup — a later start retries. The caller guarantees Everything is not
+   * running from this copy before invoking it.
    */
-  async stopPortable(timeoutMs = 4_000): Promise<void> {
-    // "-exit" targets whichever Everything instance is running, so only send it
-    // when no system Everything exists (then the running one must be ours).
-    const installed = await this.installedEverything();
-    if (!existsSync(this.portablePath) || installed) {
-      log(
-        `stopPortable skipped: portable=${existsSync(this.portablePath) ? "present" : "missing"} ` +
-          `installed=${installed ?? "none"}`,
-      );
+  private async syncPortable(): Promise<void> {
+    if (!this.bundledPortableDir) {
+      log("syncPortable skipped: no bundled source directory configured");
       return;
     }
-    log(`stopPortable: "${this.portablePath}" -config "${this.configPath}" -exit`);
-    await new Promise<void>((resolve) => {
-      try {
-        const child = spawn(this.portablePath, ["-config", this.configPath, "-exit"], {
-          stdio: "ignore",
-          windowsHide: true,
-        });
-        const timer = setTimeout(() => {
-          log("stopPortable timed out; killing -exit process");
-          child.kill();
-          resolve();
-        }, timeoutMs);
-        const done = (detail: string) => {
-          clearTimeout(timer);
-          log(`stopPortable finished: ${detail}`);
-          resolve();
-        };
-        child.on("error", (error) => done(`error ${error.message}`));
-        child.on("close", (code) => done(`exit ${code}`));
-      } catch (error) {
-        log(`stopPortable threw: ${(error as Error).message}`);
-        resolve();
+    const targetDir = path.dirname(this.portablePath);
+    const files = [
+      { name: path.basename(this.portablePath), required: true },
+      { name: "Everything.lng", required: false },
+    ];
+    try {
+      await mkdir(targetDir, { recursive: true });
+    } catch (error) {
+      log(`syncPortable mkdir failed: ${(error as Error).message}`);
+      return;
+    }
+    for (const file of files) {
+      const source = path.join(this.bundledPortableDir, file.name);
+      const destination = path.join(targetDir, file.name);
+      await this.syncFile(source, destination, file.required);
+    }
+  }
+
+  /**
+   * Copy `source` to `destination` when the destination is missing or differs
+   * from the source (by size or mtime). The copy goes to a sibling temp file and
+   * is renamed into place so readers never observe a partial file. Any failure
+   * is logged and swallowed.
+   */
+  private async syncFile(source: string, destination: string, required: boolean): Promise<void> {
+    try {
+      const sourceInfo = await stat(source).catch(() => null);
+      if (!sourceInfo) {
+        log(
+          `syncPortable source missing: ${source}${required ? "" : " (optional)"}`,
+        );
+        return;
       }
-    });
-    this.providerStarted = false;
+      const destinationInfo = await stat(destination).catch(() => null);
+      if (
+        destinationInfo &&
+        destinationInfo.size === sourceInfo.size &&
+        destinationInfo.mtimeMs >= sourceInfo.mtimeMs
+      ) {
+        return;
+      }
+      const temporary = `${destination}.tmp-${process.pid}-${Date.now()}`;
+      await copyFile(source, temporary);
+      await rename(temporary, destination).catch(async (error) => {
+        await unlink(temporary).catch(() => undefined);
+        throw error;
+      });
+      log(
+        `syncPortable copied ${source} -> ${destination} ` +
+          `(size ${sourceInfo.size}, reason ${destinationInfo ? "changed" : "missing"})`,
+      );
+    } catch (error) {
+      log(`syncPortable copy failed for ${destination}: ${(error as Error).message}`);
+    }
   }
 
   private queryHelper(query: string, offset: number, limit: number): Promise<HelperResult | null> {

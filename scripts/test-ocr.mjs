@@ -8,8 +8,8 @@ const modelDirectory = path.join("native", "ocr-models");
 const service = new PaddleOcrService({
   model: {
     detection: path.join(modelDirectory, "PP-OCRv5_mobile_det_infer.onnx"),
-    recognition: path.join(modelDirectory, "PP-OCRv5_mobile_rec_infer.onnx"),
-    charactersDictionary: path.join(modelDirectory, "ppocrv5_dict.txt"),
+    recognition: path.join(modelDirectory, "PP-OCRv6_small_rec.ort"),
+    charactersDictionary: path.join(modelDirectory, "ppocrv6_dict.txt"),
   },
   processing: { engine: "opencv" },
   detection: { maxSideLength: 1_920, minimumAreaThreshold: 4 },
@@ -33,11 +33,11 @@ try {
   const input = image.buffer.slice(image.byteOffset, image.byteOffset + image.byteLength);
   const result = await service.recognize(input, { noCache: true });
   const compact = result.text.replace(/\s+/g, "").toLowerCase();
-  // PP-OCRv5 mobile recognition is reliable on clear Latin and CJK text but
-  // weaker on the low-contrast gray "Hello world" line in this sample, so we
-  // assert on the crisp Latin header instead to keep the check meaningful.
+  // PP-OCRv6 small recognition also reads the low-contrast gray "Hello world"
+  // line in this sample, which the earlier v5 mobile model missed.
   assert.match(compact, /zh-cn/);
   assert.match(compact, /mymemory/);
+  assert.match(compact, /helloworld/);
   assert.match(compact, /你好/);
   assert.match(compact, /世界/);
   console.log(`PaddleOCR smoke test passed (confidence=${result.confidence.toFixed(3)})`);

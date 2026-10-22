@@ -1455,9 +1455,10 @@ void app.whenReady().then(async () => {
     "everything",
     `app start v${app.getVersion()} packaged=${app.isPackaged} argv=${JSON.stringify(process.argv.slice(1))}`,
   );
+  const everythingRunDir = path.join(app.getPath("userData"), "everything");
   const fileSearch = new FileSearch(
     FileSearch.resolveExecutable(app.isPackaged, process.resourcesPath),
-    FileSearch.resolvePortable(app.isPackaged, process.resourcesPath),
+    path.join(everythingRunDir, "Everything.exe"),
     path.join(app.getPath("userData"), "everything.ini"),
     path.join(app.getPath("userData"), "everything.db"),
     () => {
@@ -1478,6 +1479,7 @@ void app.whenReady().then(async () => {
       }
       return [...roots];
     },
+    path.dirname(FileSearch.resolvePortable(app.isPackaged, process.resourcesPath)),
   );
 
   // Warm up the Everything provider shortly after startup so the first file
@@ -1712,11 +1714,10 @@ void app.whenReady().then(async () => {
     onBeforeInstall: async () => {
       quitting = true;
       // Release files under resources/native so the installer can overwrite them.
+      // The portable Everything now runs from a copy in userData, so there is no
+      // need to stop it: the installer only replaces the bundled source.
       helper.stop();
-      await Promise.all([
-        new Promise((resolve) => setTimeout(resolve, 700)),
-        fileSearch.stopPortable(),
-      ]);
+      await new Promise((resolve) => setTimeout(resolve, 700));
     },
   });
   ipcMain.on("builtin:open", (event, id: unknown) => {

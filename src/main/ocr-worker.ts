@@ -48,8 +48,8 @@ async function getService(): Promise<PaddleOcrServiceType> {
     const service = new PaddleOcrService({
       model: {
         detection: modelPath("PP-OCRv5_mobile_det_infer.onnx"),
-        recognition: modelPath("PP-OCRv5_mobile_rec_infer.onnx"),
-        charactersDictionary: modelPath("ppocrv5_dict.txt"),
+        recognition: modelPath("PP-OCRv6_small_rec.ort"),
+        charactersDictionary: modelPath("ppocrv6_dict.txt"),
       },
       processing: { engine: "opencv" },
       detection: {

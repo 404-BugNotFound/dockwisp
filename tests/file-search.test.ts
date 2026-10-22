@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, writeFile, readFile, stat, utimes, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { FileSearch, parseEverythingUninstallEntries } from "../src/main/file-search";
 
 interface MutableFileSearch {
   queryHelper: (query: string, offset: number, limit: number) => Promise<unknown>;
   runHelper: (argument: string) => Promise<unknown>;
-  startProvider: () => Promise<boolean>;
+  startProvider: (reason: string) => Promise<boolean>;
+  syncPortable: () => Promise<void>;
+  installedEverything: () => Promise<string | null>;
   indexingObservedAt: number;
 }
 
@@ -96,4 +101,135 @@ test("returns complete file results in stable pages", async () => {
   assert.deepEqual(last.paths, paths.slice(200));
   assert.equal(last.nextOffset, 205);
   assert.equal(last.hasMore, false);
+});
+
+test("syncPortable copies the bundled Everything when the target is missing", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "dockwisp-sync-"));
+  try {
+    const bundled = path.join(root, "bundled");
+    const runDir = path.join(root, "run");
+    await mkdir(bundled, { recursive: true });
+    await writeFile(path.join(bundled, "Everything.exe"), "EXE-CONTENT");
+    await writeFile(path.join(bundled, "Everything.lng"), "LNG-CONTENT");
+
+    const search = new FileSearch(
+      "missing-helper",
+      path.join(runDir, "Everything.exe"),
+      path.join(root, "everything.ini"),
+      path.join(root, "everything.db"),
+      () => [],
+      bundled,
+    );
+    await (search as unknown as MutableFileSearch).syncPortable();
+
+    assert.equal(await readFile(path.join(runDir, "Everything.exe"), "utf8"), "EXE-CONTENT");
+    assert.equal(await readFile(path.join(runDir, "Everything.lng"), "utf8"), "LNG-CONTENT");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("syncPortable recopies only when the bundled source differs", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "dockwisp-sync-"));
+  try {
+    const bundled = path.join(root, "bundled");
+    const runDir = path.join(root, "run");
+    await mkdir(bundled, { recursive: true });
+    await writeFile(path.join(bundled, "Everything.exe"), "V1");
+    await writeFile(path.join(bundled, "Everything.lng"), "LNG");
+
+    const target = path.join(runDir, "Everything.exe");
+    const search = new FileSearch(
+      "missing-helper",
+      target,
+      path.join(root, "everything.ini"),
+      path.join(root, "everything.db"),
+      () => [],
+      bundled,
+    );
+    const mutable = search as unknown as MutableFileSearch;
+
+    await mutable.syncPortable();
+    const firstCopy = await stat(target);
+
+    // An identical source (same size, source not newer) must not trigger a copy.
+    await mutable.syncPortable();
+    const secondCopy = await stat(target);
+    assert.equal(secondCopy.mtimeMs, firstCopy.mtimeMs);
+
+    // A changed source (different size, newer mtime) must trigger a recopy.
+    await writeFile(path.join(bundled, "Everything.exe"), "VERSION-2");
+    const future = new Date(Date.now() + 10_000);
+    await utimes(path.join(bundled, "Everything.exe"), future, future);
+    await mutable.syncPortable();
+    assert.equal(await readFile(target, "utf8"), "VERSION-2");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("syncPortable tolerates a missing optional language file", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "dockwisp-sync-"));
+  try {
+    const bundled = path.join(root, "bundled");
+    const runDir = path.join(root, "run");
+    await mkdir(bundled, { recursive: true });
+    await writeFile(path.join(bundled, "Everything.exe"), "EXE");
+
+    const search = new FileSearch(
+      "missing-helper",
+      path.join(runDir, "Everything.exe"),
+      path.join(root, "everything.ini"),
+      path.join(root, "everything.db"),
+      () => [],
+      bundled,
+    );
+    await (search as unknown as MutableFileSearch).syncPortable();
+
+    assert.equal(await readFile(path.join(runDir, "Everything.exe"), "utf8"), "EXE");
+    const lng = await stat(path.join(runDir, "Everything.lng")).catch(() => null);
+    assert.equal(lng, null);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("startProvider syncs the writable portable copy before spawning", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "dockwisp-start-"));
+  try {
+    const bundled = path.join(root, "bundled");
+    const runDir = path.join(root, "run");
+    await mkdir(bundled, { recursive: true });
+    await writeFile(path.join(bundled, "Everything.exe"), "PORTABLE");
+
+    const target = path.join(runDir, "Everything.exe");
+    const search = new FileSearch(
+      "missing-helper",
+      target,
+      path.join(root, "everything.ini"),
+      path.join(root, "everything.db"),
+      () => [],
+      bundled,
+    );
+    const mutable = search as unknown as MutableFileSearch;
+    // No system Everything, so the portable provider is chosen.
+    mutable.installedEverything = async () => null;
+    // Spy on the sync step while still letting it copy, to prove startProvider
+    // syncs the writable copy before it would spawn Everything.
+    let syncedBeforeSpawn = false;
+    const realSync = mutable.syncPortable.bind(search);
+    mutable.syncPortable = async () => {
+      syncedBeforeSpawn = true;
+      await realSync();
+    };
+
+    // The fake exe is not a real PE, so the spawn is a no-op here; we only assert
+    // that the writable copy was produced from the bundled source first.
+    await mutable.startProvider("test");
+
+    assert.equal(syncedBeforeSpawn, true);
+    assert.equal(await readFile(target, "utf8"), "PORTABLE");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
