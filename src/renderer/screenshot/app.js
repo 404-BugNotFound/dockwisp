@@ -8,8 +8,10 @@
 const api = window.screenshot || {
   // 开发/自检时的降级桩，真实环境由 preload 注入。
   onState() {},
+  onReset() {},
   close() {},
   ready() {},
+  async imageBytes() { return null; },
   async copyImage() { return false; },
   async saveImage() { return null; },
   async ocr() { return ""; },
@@ -25,6 +27,10 @@ const selEl = document.getElementById("selection");
 const sizeTag = document.getElementById("sizeTag");
 const toolbar = document.getElementById("toolbar");
 const toast = document.getElementById("toast");
+const maskTop = document.getElementById("maskTop");
+const maskBottom = document.getElementById("maskBottom");
+const maskLeft = document.getElementById("maskLeft");
+const maskRight = document.getElementById("maskRight");
 
 const panel = document.getElementById("panel");
 const panelTitle = document.getElementById("panelTitle");
@@ -43,7 +49,12 @@ const octx = anno.getContext("2d");
 const MIN_SELECTION_CSS = 8; // 选区过小（CSS px）不生效
 
 let imageReady = false;
-let baseImage = null; // 已加载的原图 <img>/Image
+let stateToken = 0; // 每轮截图递增，用于丢弃过期的图片解码结果
+let annoDirty = false; // 标注层是否需要重绘（选区拖动时不必重绘全分辨率画布）
+let baseImage = null; // 已加载的原图 <img>/Image（显示用；file:// 源会污染画布）
+let cleanBase = null; // 导出用的未污染位图（污染时按需从原始字节解码）
+let imageTainted = false; // 当前 baseImage 是否会污染画布（file:// 原生截图）
+let cleanBasePromise = null; // 正在解码 cleanBase 的 Promise（避免并发重复解码）
 let natW = 0; // 图片原始宽（像素）
 let natH = 0; // 图片原始高（像素）
 
@@ -68,22 +79,21 @@ const pointer = {
 
 /* --------------------------- 坐标换算 --------------------------- */
 
-// 原始像素 → CSS 像素的比例（分别计算，不依赖 scaleFactor 精确值）。
+// 原始像素 → CSS 像素的比例。#shot 铺满视口，用缓存的视口尺寸避免每帧强制布局。
+let viewW = window.innerWidth;
+let viewH = window.innerHeight;
 function scaleX() {
-  return shot.clientWidth / natW;
+  return viewW / natW;
 }
 function scaleY() {
-  return shot.clientHeight / natH;
+  return viewH / natH;
 }
 
-// 指针事件 → 图片原始像素坐标（相对 #shot 左上角）。
+// 指针事件 → 图片原始像素坐标（#shot 左上角即视口原点）。
 function toImageCoords(ev) {
-  const rect = shot.getBoundingClientRect();
-  const cssX = ev.clientX - rect.left;
-  const cssY = ev.clientY - rect.top;
   return {
-    x: clamp((cssX / rect.width) * natW, 0, natW),
-    y: clamp((cssY / rect.height) * natH, 0, natH),
+    x: clamp((ev.clientX / viewW) * natW, 0, natW),
+    y: clamp((ev.clientY / viewH) * natH, 0, natH),
   };
 }
 
@@ -94,25 +104,104 @@ function clamp(v, lo, hi) {
 /* --------------------------- 初始化 --------------------------- */
 
 api.onState((state) => {
-  if (!state || typeof state.image !== "string") return;
+  if (!state || typeof state.imageUrl !== "string") return;
+  // 新一轮截图：先彻底重置上一轮的所有状态，避免复用窗口残留。
+  resetAll();
+  viewW = window.innerWidth;
+  viewH = window.innerHeight;
+  imageTainted = state.tainted === true;
+  const token = ++stateToken;
   const img = new Image();
-  img.onload = () => {
-    baseImage = img;
-    // naturalWidth 作为真实像素基准（state.width 可能与之一致，优先用 natural）。
-    natW = img.naturalWidth || state.width || img.width;
-    natH = img.naturalHeight || state.height || img.height;
-    anno.width = natW;
-    anno.height = natH;
-    shot.src = img.src;
-    imageReady = true;
-    render();
-    // 首帧绘制完成后再通知主进程显示窗口，避免解码前的暗色空屏闪烁。
-    // 窗口在 ready 之前通常是隐藏的，隐藏窗口的 requestAnimationFrame 可能不触发，
-    // 故同时挂一个 setTimeout 兜底，保证 ready 一定被调用一次（避免“等 rAF→不显示→rAF 不触发”的死锁）。
-    notifyReady();
-  };
-  img.src = state.image;
+  img.src = state.imageUrl;
+  // decode() 在后台线程解码，避免把大图解码压在首帧绘制上。
+  img
+    .decode()
+    .catch(() => undefined)
+    .then(() => {
+      if (token !== stateToken) return;
+      if (!img.naturalWidth) {
+        // 解码失败也要通知，否则窗口会一直隐藏卡住。
+        notifyReady();
+        return;
+      }
+      baseImage = img;
+      natW = img.naturalWidth || state.width;
+      natH = img.naturalHeight || state.height;
+      if (anno.width !== natW || anno.height !== natH) {
+        anno.width = natW;
+        anno.height = natH;
+      } else {
+        octx.clearRect(0, 0, natW, natH);
+      }
+      annoDirty = false;
+      shot.src = img.src;
+      imageReady = true;
+      render();
+      // 首帧绘制完成后再通知主进程显示窗口，避免空屏或旧帧闪烁。
+      notifyReady();
+    });
 });
+
+// 关闭时主进程通知渲染器彻底重置，为下次复用做准备。
+api.onReset(() => {
+  stateToken += 1;
+  resetAll();
+  shot.removeAttribute("src");
+  if (natW > 0 && natH > 0) octx.clearRect(0, 0, natW, natH);
+  annoDirty = false;
+  render();
+});
+
+/** 把渲染器的全部全局状态恢复到“刚打开、尚无图”的初始态。 */
+function resetAll() {
+  imageReady = false;
+  baseImage = null;
+  cleanBase = null;
+  cleanBasePromise = null;
+  imageTainted = false;
+  selection = null;
+  selectionVersion += 1; // 使任何在途的 OCR/翻译结果过期
+  annotations = [];
+  activeTool = null;
+  activeColor = "#ff4d4f";
+  ocrText = null;
+  currentPanel = null;
+  busy = false;
+  readyNotified = false;
+  pointer.mode = "idle";
+  pointer.handle = null;
+  pointer.originSel = null;
+  pointer.draft = null;
+
+  // DOM 复位。
+  root.dataset.mode = "idle";
+  root.dataset.toolActive = "false";
+  root.dataset.hasSelection = "false";
+  selEl.hidden = true;
+  toolbar.hidden = true;
+  panel.hidden = true;
+  toast.hidden = true;
+  toast.classList.remove("show");
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
+  // 还原 OCR/翻译按钮上的“识别中/翻译中”忙态文案。
+  restoreBtn("ocr");
+  restoreBtn("translate");
+  syncToolbar();
+}
+
+function restoreBtn(btnId) {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  btn.classList.remove("busy");
+  btn.disabled = false;
+  if (btn.dataset.label) {
+    btn.textContent = btn.dataset.label;
+    delete btn.dataset.label;
+  }
+}
 
 let readyNotified = false;
 function notifyReady() {
@@ -122,9 +211,9 @@ function notifyReady() {
     readyNotified = true;
     if (typeof api.ready === "function") api.ready();
   };
-  // 优先在下一帧（已完成首帧绘制）通知；隐藏窗口 rAF 可能不触发，用 setTimeout 兜底。
+  // 优先在下一帧（已完成首帧绘制）通知；setTimeout 兜底防止 rAF 不触发导致死锁。
   requestAnimationFrame(fire);
-  setTimeout(fire, 60);
+  setTimeout(fire, 32);
 }
 
 /* --------------------------- 工具栏事件 --------------------------- */
@@ -201,6 +290,7 @@ root.addEventListener("contextmenu", (e) => {
     selection = null;
     selectionVersion += 1;
     annotations = [];
+    annoDirty = true;
     ocrText = null;
     activeTool = null;
     root.dataset.toolActive = "false";
@@ -233,7 +323,10 @@ function insideSelection(p) {
 function invalidateSelectionState(clearAnnotations) {
   selectionVersion += 1;
   ocrText = null;
-  if (clearAnnotations) annotations = [];
+  if (clearAnnotations && annotations.length > 0) {
+    annotations = [];
+    annoDirty = true;
+  }
   hidePanel();
 }
 
@@ -330,6 +423,7 @@ function onPointerUp() {
       annotations.push(pointer.draft);
     }
     pointer.draft = null;
+    annoDirty = true;
   }
 
   pointer.mode = "idle";
@@ -393,6 +487,7 @@ function draftIsValid(draft) {
 function undo() {
   if (annotations.length === 0) return;
   annotations.pop();
+  annoDirty = true;
   render();
 }
 
@@ -403,17 +498,24 @@ function render() {
 
   const hasSel = !!(selection && selection.w > 0 && selection.h > 0);
   root.dataset.hasSelection = hasSel ? "true" : "false";
+  const dragging = pointer.mode === "creating" || pointer.mode === "moving" || pointer.mode === "resizing";
 
-  // 选区框（CSS 像素定位）。
+  // 选区框（CSS 像素定位）。#shot 铺满视口，左上角恒为 (0,0)，避免每帧强制布局读取。
   if (hasSel) {
     const sx = scaleX();
     const sy = scaleY();
-    const rect = shot.getBoundingClientRect();
+    const l = selection.x * sx;
+    const t = selection.y * sy;
+    const w = selection.w * sx;
+    const h = selection.h * sy;
     selEl.hidden = false;
-    selEl.style.left = `${rect.left + selection.x * sx}px`;
-    selEl.style.top = `${rect.top + selection.y * sy}px`;
-    selEl.style.width = `${selection.w * sx}px`;
-    selEl.style.height = `${selection.h * sy}px`;
+    selEl.style.transform = `translate(${l}px, ${t}px)`;
+    selEl.style.width = `${w}px`;
+    selEl.style.height = `${h}px`;
+    setBox(maskTop, 0, 0, viewW, t);
+    setBox(maskBottom, 0, t + h, viewW, Math.max(0, viewH - t - h));
+    setBox(maskLeft, 0, t, l, h);
+    setBox(maskRight, l + w, t, Math.max(0, viewW - l - w), h);
     sizeTag.textContent = `${Math.round(selection.w)} × ${Math.round(selection.h)}`;
     // 顶部空间不足时标签落到选区内。
     selEl.dataset.tag = selection.y * sy < 26 ? "inside" : "outside";
@@ -421,9 +523,20 @@ function render() {
     selEl.hidden = true;
   }
 
-  drawAnnotations();
-  positionToolbar(hasSel);
-  syncToolbar();
+  // 全分辨率标注层只在标注变化时重绘，拖动选区时完全跳过。
+  if (annoDirty || pointer.mode === "drawing") {
+    annoDirty = false;
+    drawAnnotations();
+  }
+  // 拖动中隐藏工具栏，松手后再定位，避免每帧 offsetWidth 触发同步布局。
+  positionToolbar(hasSel && !dragging);
+  if (!dragging && pointer.mode !== "drawing") syncToolbar();
+}
+
+function setBox(el, x, y, w, h) {
+  el.style.transform = `translate(${x}px, ${y}px)`;
+  el.style.width = `${w}px`;
+  el.style.height = `${h}px`;
 }
 
 // 在标注 canvas 上绘制全部标注 + 当前草稿（原始像素坐标）。
@@ -435,7 +548,7 @@ function drawAnnotations() {
   }
 }
 
-function drawOne(ctx, a) {
+function drawOne(ctx, a, base) {
   // 线宽随图片尺寸缩放，保持视觉一致（约 3 CSS px）。
   const lw = Math.max(2, Math.round(3 / scaleX()));
   ctx.save();
@@ -456,7 +569,7 @@ function drawOne(ctx, a) {
     for (let i = 1; i < a.points.length; i++) ctx.lineTo(a.points[i].x, a.points[i].y);
     ctx.stroke();
   } else if (a.tool === "mosaic") {
-    drawMosaic(ctx, normalizeRect(a.x0, a.y0, a.x1, a.y1));
+    drawMosaic(ctx, normalizeRect(a.x0, a.y0, a.x1, a.y1), base || baseImage);
   }
   ctx.restore();
 }
@@ -477,8 +590,9 @@ function drawArrow(ctx, x0, y0, x1, y1, lw) {
 }
 
 // 马赛克：从原图采样缩小区域，再关闭平滑放大回填。
-function drawMosaic(ctx, r) {
-  if (!baseImage || r.w < 1 || r.h < 1) return;
+function drawMosaic(ctx, r, base) {
+  const src = base || baseImage;
+  if (!src || r.w < 1 || r.h < 1) return;
   const block = 10; // 原始像素块大小
   const sw = Math.max(1, Math.round(r.w / block));
   const sh = Math.max(1, Math.round(r.h / block));
@@ -488,7 +602,7 @@ function drawMosaic(ctx, r) {
   const tctx = tmp.getContext("2d");
   tctx.imageSmoothingEnabled = false;
   // 把原图对应区域画成极小图。
-  tctx.drawImage(baseImage, r.x, r.y, r.w, r.h, 0, 0, sw, sh);
+  tctx.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, sw, sh);
   // 再放大回填（像素化）。
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(tmp, 0, 0, sw, sh, r.x, r.y, r.w, r.h);
@@ -537,12 +651,36 @@ function positionToolbar(hasSel) {
 
 /* --------------------------- 导出选区 PNG --------------------------- */
 
-function exportSelectionPng(includeAnnotations = true) {
+/**
+ * 确保有一份“未污染”的原图可供导出。file:// 原生截图会污染画布，导致
+ * toDataURL 抛 SecurityError；此时从主进程取原始字节，经 Blob→ImageBitmap
+ * 重新解码出同源位图。仅在首次导出时付出一次代价，之后缓存复用。
+ */
+async function ensureCleanBase() {
+  if (!imageTainted) return baseImage;
+  if (cleanBase) return cleanBase;
+  if (!cleanBasePromise) {
+    cleanBasePromise = (async () => {
+      const bytes = await api.imageBytes();
+      if (!bytes) throw new Error("无法读取截图数据");
+      const blob = new Blob([bytes], { type: "image/bmp" });
+      const bitmap = await createImageBitmap(blob);
+      cleanBase = bitmap;
+      return bitmap;
+    })();
+  }
+  return cleanBasePromise;
+}
+
+async function exportSelectionPng(includeAnnotations = true) {
   if (!selection || selection.w < 1 || selection.h < 1) return null;
   const w = Math.max(1, Math.round(selection.w));
   const h = Math.max(1, Math.round(selection.h));
   const sx = Math.round(selection.x);
   const sy = Math.round(selection.y);
+
+  // 污染路径：先拿到未污染位图，再合成，保证 toDataURL 不抛异常。
+  const base = imageTainted ? await ensureCleanBase() : baseImage;
 
   const out = document.createElement("canvas");
   out.width = w;
@@ -550,14 +688,14 @@ function exportSelectionPng(includeAnnotations = true) {
   const ctx = out.getContext("2d");
 
   // 1) 截图对应区域。
-  ctx.drawImage(baseImage, sx, sy, w, h, 0, 0, w, h);
+  ctx.drawImage(base, sx, sy, w, h, 0, 0, w, h);
 
   // 2) 标注对应区域：以选区左上为原点重绘（含马赛克像素化）。
   // OCR 只需要干净的截图（includeAnnotations=false），标注线会干扰识别。
   if (includeAnnotations) {
     ctx.save();
     ctx.translate(-sx, -sy);
-    for (const a of annotations) drawOne(ctx, a);
+    for (const a of annotations) drawOne(ctx, a, base);
     ctx.restore();
   }
 
@@ -567,7 +705,7 @@ function exportSelectionPng(includeAnnotations = true) {
 /* --------------------------- 复制 / 保存 --------------------------- */
 
 async function doCopy() {
-  const url = exportSelectionPng();
+  const url = await exportSelectionPng();
   if (!url) return false;
   try {
     const ok = await api.copyImage(url);
@@ -580,7 +718,7 @@ async function doCopy() {
 }
 
 async function doSave() {
-  const url = exportSelectionPng();
+  const url = await exportSelectionPng();
   if (!url) return;
   try {
     const result = await api.saveImage(url);
@@ -612,7 +750,7 @@ async function runOcr(force = false) {
     showOcrPanel(ocrText);
     return ocrText;
   }
-  const url = exportSelectionPng(false);
+  const url = await exportSelectionPng(false);
   if (!url) return null;
   const version = selectionVersion;
 
@@ -836,6 +974,8 @@ window.addEventListener("keydown", async (e) => {
 /* --------------------------- 窗口尺寸变化 --------------------------- */
 
 window.addEventListener("resize", () => {
+  viewW = window.innerWidth;
+  viewH = window.innerHeight;
   if (imageReady) render();
 });
 

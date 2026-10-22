@@ -97,8 +97,8 @@
         "to": "native/ocr-models/PP-OCRv5_mobile_det_infer.onnx"
       },
       {
-        "from": "native/ocr-models/PP-OCRv5_server_rec_infer.onnx",
-        "to": "native/ocr-models/PP-OCRv5_server_rec_infer.onnx"
+        "from": "native/ocr-models/PP-OCRv5_mobile_rec_infer.onnx",
+        "to": "native/ocr-models/PP-OCRv5_mobile_rec_infer.onnx"
       },
       {
         "from": "native/ocr-models/ppocrv5_dict.txt",

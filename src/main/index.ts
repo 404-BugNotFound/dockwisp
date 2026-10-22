@@ -2539,7 +2539,7 @@ void app.whenReady().then(async () => {
     try {
       const text = await recognizeImageFile(path.resolve(ocrSmokeTestPath));
       const compact = text.replace(/\s+/g, "").toLowerCase();
-      if (!compact.includes("helloworld") || !compact.includes("你好") || !compact.includes("世界")) {
+      if (!compact.includes("mymemory") || !compact.includes("你好") || !compact.includes("世界")) {
         throw new Error(`OCR smoke output was incomplete: ${text}`);
       }
       console.log(`DOCKWISP_OCR_SMOKE:${JSON.stringify({ text })}`);

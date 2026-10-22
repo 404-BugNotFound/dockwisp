@@ -23,6 +23,15 @@ interface HelperResponse {
   text?: string;
   error?: string;
   windows?: WindowInfo[];
+  path?: string;
+  width?: number;
+  height?: number;
+}
+
+export interface CaptureResult {
+  path: string;
+  width: number;
+  height: number;
 }
 
 export interface WindowInfo {
@@ -118,6 +127,31 @@ export class MouseHelper extends EventEmitter {
   async prepareWindow(handle: bigint | number): Promise<boolean> {
     const response = await this.request("prepare", [String(handle)], 1_000);
     return response.ok;
+  }
+
+  /**
+   * Capture a physical-pixel rectangle of the virtual screen with GDI BitBlt
+   * and return the path to the uncompressed 32-bit BMP the helper wrote under
+   * the OS temp directory. Coordinates must be physical pixels, i.e. the result
+   * of screen.dipToScreenRect for the target display.
+   */
+  async captureScreen(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ): Promise<CaptureResult | null> {
+    const response = await this.request(
+      "capture",
+      [String(Math.round(x)), String(Math.round(y)), String(Math.round(width)), String(Math.round(height))],
+      5_000,
+    );
+    if (!response.ok || typeof response.path !== "string") return null;
+    return {
+      path: response.path,
+      width: typeof response.width === "number" ? response.width : width,
+      height: typeof response.height === "number" ? response.height : height,
+    };
   }
 
   waitUntilReady(timeoutMs = 2_000): Promise<boolean> {

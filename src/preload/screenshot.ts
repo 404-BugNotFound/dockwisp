@@ -1,10 +1,13 @@
 import { contextBridge, ipcRenderer } from "electron";
 
 interface ScreenshotState {
-  image: string;
+  imageUrl: string;
   width: number;
   height: number;
   scaleFactor: number;
+  // True when the image is loaded from a file:// URL, which taints the canvas
+  // and blocks toDataURL; the renderer then re-fetches raw bytes for export.
+  tainted: boolean;
 }
 
 interface TranslationResult {
@@ -17,8 +20,13 @@ interface TranslationResult {
 contextBridge.exposeInMainWorld("screenshot", {
   onState: (callback: (state: ScreenshotState) => void) =>
     ipcRenderer.on("screenshot:state", (_event, state: ScreenshotState) => callback(state)),
+  onReset: (callback: () => void) =>
+    ipcRenderer.on("screenshot:reset", () => callback()),
   ready: () => ipcRenderer.send("screenshot:ready"),
   close: () => ipcRenderer.send("screenshot:close"),
+  // Raw bytes of the current native screenshot, for the tainted-canvas export
+  // fallback. Returns null when no native capture is active (e.g. data-URL path).
+  imageBytes: (): Promise<Uint8Array | null> => ipcRenderer.invoke("screenshot:image-bytes"),
   copyImage: (dataUrl: string): Promise<boolean> =>
     ipcRenderer.invoke("screenshot:copy-image", dataUrl),
   copyText: (text: string): Promise<boolean> =>

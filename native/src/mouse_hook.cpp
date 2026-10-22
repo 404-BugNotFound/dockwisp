@@ -3,7 +3,9 @@
 #include <dwmapi.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cwctype>
+#include <fstream>
 #include <iostream>
 #include <iterator>
 #include <mutex>
@@ -289,6 +291,100 @@ bool send_media_key(WORD virtual_key) {
   return SendInput(2, inputs, sizeof(INPUT)) == 2;
 }
 
+std::atomic<uint32_t> capture_counter{0};
+
+// Build a unique temp-file path for a screenshot. Returns the wide path, and
+// sets `utf8` to its UTF-8 form for the JSON response.
+std::wstring make_capture_path(std::string& utf8) {
+  wchar_t temp_dir[MAX_PATH]{};
+  const DWORD length = GetTempPathW(MAX_PATH, temp_dir);
+  std::wstring directory = (length > 0 && length < MAX_PATH) ? std::wstring(temp_dir, length)
+                                                             : std::wstring(L".\\");
+  wchar_t name[128]{};
+  swprintf(name, static_cast<int>(std::size(name)), L"dockwisp-shot-%lu-%llu-%u.bmp",
+           GetCurrentProcessId(), static_cast<unsigned long long>(GetTickCount64()),
+           capture_counter.fetch_add(1));
+  std::wstring full = directory + name;
+  utf8 = to_utf8(full);
+  return full;
+}
+
+// Capture a rectangle of the virtual screen (physical pixels) with BitBlt and
+// write it as an uncompressed 32-bit BMP. `x`/`y` are in the same physical
+// coordinate space Electron's screen.dipToScreenRect produces. Returns true on
+// success and fills `out_path` (UTF-8). CAPTURECLT includes layered windows.
+bool capture_screen_rect(long x, long y, long width, long height, std::string& out_path,
+                         std::string& error) {
+  if (width <= 0 || height <= 0) {
+    error = "invalid-capture-size";
+    return false;
+  }
+  HDC screen_dc = GetDC(nullptr);
+  if (!screen_dc) {
+    error = "no-screen-dc";
+    return false;
+  }
+  HDC memory_dc = CreateCompatibleDC(screen_dc);
+  HBITMAP bitmap = memory_dc ? CreateCompatibleBitmap(screen_dc, width, height) : nullptr;
+  bool ok = false;
+  if (memory_dc && bitmap) {
+    HGDIOBJ previous = SelectObject(memory_dc, bitmap);
+    if (BitBlt(memory_dc, 0, 0, width, height, screen_dc, x, y, SRCCOPY | CAPTUREBLT)) {
+      BITMAPINFO info{};
+      info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+      info.bmiHeader.biWidth = width;
+      // Positive height => bottom-up BMP, the conventional layout decoders expect.
+      info.bmiHeader.biHeight = height;
+      info.bmiHeader.biPlanes = 1;
+      info.bmiHeader.biBitCount = 32;
+      info.bmiHeader.biCompression = BI_RGB;
+      const size_t row_bytes = static_cast<size_t>(width) * 4;
+      const size_t pixel_bytes = row_bytes * static_cast<size_t>(height);
+      std::vector<uint8_t> pixels(pixel_bytes);
+      if (GetDIBits(memory_dc, bitmap, 0, static_cast<UINT>(height), pixels.data(), &info,
+                    DIB_RGB_COLORS)) {
+        // GDI leaves the 4th byte (alpha) at 0; force opaque so decoders that
+        // honour the alpha channel do not render a fully transparent image.
+        for (size_t i = 3; i < pixel_bytes; i += 4) pixels[i] = 0xFF;
+
+        BITMAPFILEHEADER file_header{};
+        file_header.bfType = 0x4D42;  // "BM"
+        file_header.bfOffBits =
+            sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+        file_header.bfSize =
+            file_header.bfOffBits + static_cast<DWORD>(pixel_bytes);
+
+        BITMAPINFOHEADER out_header = info.bmiHeader;
+        out_header.biSizeImage = static_cast<DWORD>(pixel_bytes);
+
+        std::wstring path = make_capture_path(out_path);
+        std::ofstream file(path.c_str(), std::ios::binary | std::ios::trunc);
+        if (file) {
+          file.write(reinterpret_cast<const char*>(&file_header), sizeof(file_header));
+          file.write(reinterpret_cast<const char*>(&out_header), sizeof(out_header));
+          file.write(reinterpret_cast<const char*>(pixels.data()),
+                     static_cast<std::streamsize>(pixel_bytes));
+          ok = file.good();
+          if (!ok) error = "write-failed";
+        } else {
+          error = "open-failed";
+        }
+      } else {
+        error = "getdibits-failed";
+      }
+    } else {
+      error = "bitblt-failed";
+    }
+    SelectObject(memory_dc, previous);
+  } else {
+    error = "gdi-alloc-failed";
+  }
+  if (bitmap) DeleteObject(bitmap);
+  if (memory_dc) DeleteDC(memory_dc);
+  ReleaseDC(nullptr, screen_dc);
+  return ok;
+}
+
 
 LRESULT CALLBACK mouse_proc(int code, WPARAM event, LPARAM data) {
   if (code == HC_ACTION && (event == WM_MBUTTONDOWN || event == WM_MBUTTONUP)) {
@@ -393,6 +489,33 @@ void command_loop() {
       }
       disable_window_transitions(window);
       respond(id, window && IsWindow(window) ? true : false);
+    } else if (command == "capture") {
+      // capture <id> <x> <y> <width> <height> — physical-pixel rect.
+      long y = 0;
+      long width = 0;
+      long height = 0;
+      input >> y >> width >> height;
+      long x = 0;
+      bool parsed = true;
+      try {
+        x = std::stol(value);
+      } catch (...) {
+        parsed = false;
+      }
+      if (!parsed) {
+        respond(id, false, "\"error\":\"invalid-capture-args\"");
+      } else {
+        std::string path;
+        std::string error;
+        if (capture_screen_rect(x, y, width, height, path, error)) {
+          std::ostringstream fields;
+          fields << "\"path\":\"" << json_escape(path) << "\",\"width\":" << width
+                 << ",\"height\":" << height;
+          respond(id, true, fields.str());
+        } else {
+          respond(id, false, "\"error\":\"" + json_escape(error) + "\"");
+        }
+      }
     } else if (command == "ping") {
       respond(id, true);
     } else if (command == "quit") {

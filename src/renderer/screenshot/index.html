@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'"
+      content="default-src 'self'; img-src 'self' data: file:; style-src 'self'; script-src 'self'"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>截图</title>
@@ -19,8 +19,12 @@
       <canvas id="anno"></canvas>
       <!-- 无选区时的整屏暗化 -->
       <div id="dim"></div>
+      <div class="mask" id="maskTop"></div>
+      <div class="mask" id="maskBottom"></div>
+      <div class="mask" id="maskLeft"></div>
+      <div class="mask" id="maskRight"></div>
 
-      <!-- 选区框（box-shadow 负责选区外暗化） -->
+      <!-- 选区框 -->
       <div id="selection" hidden>
         <span class="size-tag" id="sizeTag"></span>
         <i class="handle" data-handle="nw"></i>

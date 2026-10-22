@@ -28,4 +28,4 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log("OCR models verified (PP-OCRv5 Mobile detection + Server recognition)");
+console.log("OCR models verified (PP-OCRv5 Mobile detection + Mobile recognition)");

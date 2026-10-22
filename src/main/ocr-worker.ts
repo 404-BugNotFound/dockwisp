@@ -1,14 +1,21 @@
 import { readFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import type { PaddleOcrService as PaddleOcrServiceType } from "ppu-paddle-ocr" with {
   "resolution-mode": "import",
 };
 
-interface OcrWorkerRequest {
+interface OcrWorkerRecognizeRequest {
   type: "recognize";
   id: number;
   imagePath: string;
 }
+
+interface OcrWorkerWarmupRequest {
+  type: "warmup";
+}
+
+type OcrWorkerRequest = OcrWorkerRecognizeRequest | OcrWorkerWarmupRequest;
 
 interface OcrWorkerResponse {
   type: "result";
@@ -34,10 +41,11 @@ async function getService(): Promise<PaddleOcrServiceType> {
   if (servicePromise) return servicePromise;
   servicePromise = (async () => {
     const { PaddleOcrService } = await import("ppu-paddle-ocr");
+    const intraOpNumThreads = Math.max(1, Math.min(os.availableParallelism() - 1, 8));
     const service = new PaddleOcrService({
       model: {
         detection: modelPath("PP-OCRv5_mobile_det_infer.onnx"),
-        recognition: modelPath("PP-OCRv5_server_rec_infer.onnx"),
+        recognition: modelPath("PP-OCRv5_mobile_rec_infer.onnx"),
         charactersDictionary: modelPath("ppocrv5_dict.txt"),
       },
       processing: { engine: "opencv" },
@@ -49,12 +57,13 @@ async function getService(): Promise<PaddleOcrServiceType> {
         charactersDictionary: [],
         minimumConfidence: 0.3,
         strategy: "per-line",
-        recBatchSize: 1,
+        recBatchSize: 6,
         maxCropSourceSideLength: 2_400,
       },
       session: {
         executionProviders: ["cpu"],
         graphOptimizationLevel: "all",
+        intraOpNumThreads,
       },
     });
     await service.initialize();
@@ -68,7 +77,7 @@ async function getService(): Promise<PaddleOcrServiceType> {
   }
 }
 
-async function recognize(request: OcrWorkerRequest): Promise<void> {
+async function recognize(request: OcrWorkerRecognizeRequest): Promise<void> {
   try {
     const image = await readFile(request.imagePath);
     const arrayBuffer = image.buffer.slice(
@@ -97,6 +106,17 @@ async function recognize(request: OcrWorkerRequest): Promise<void> {
 
 parentPort.on("message", (event) => {
   const request = event.data as Partial<OcrWorkerRequest>;
+  if (request.type === "warmup") {
+    queue = queue.then(async () => {
+      try {
+        await getService();
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        process.stderr.write(`OCR warmup failed: ${detail}\n`);
+      }
+    });
+    return;
+  }
   if (
     request.type !== "recognize" ||
     typeof request.id !== "number" ||
@@ -104,5 +124,5 @@ parentPort.on("message", (event) => {
   ) {
     return;
   }
-  queue = queue.then(() => recognize(request as OcrWorkerRequest));
+  queue = queue.then(() => recognize(request as OcrWorkerRecognizeRequest));
 });

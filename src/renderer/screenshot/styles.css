@@ -77,14 +77,26 @@ body {
   display: none;
 }
 
-/* 选区：外部暗化靠超大 box-shadow，内部保持原图清晰 */
+/* 选区：外部暗化由 4 块遮罩完成（比超大 box-shadow 每帧整屏重绘便宜得多） */
 #selection {
   position: absolute;
+  left: 0;
+  top: 0;
   border: 1px solid var(--sel-line);
-  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.42);
   cursor: move;
+  will-change: transform, width, height;
 }
 #selection[hidden] {
+  display: none;
+}
+.mask {
+  position: absolute;
+  left: 0;
+  top: 0;
+  background: rgba(0, 0, 0, 0.42);
+  pointer-events: none;
+}
+#root[data-has-selection="false"] .mask {
   display: none;
 }
 

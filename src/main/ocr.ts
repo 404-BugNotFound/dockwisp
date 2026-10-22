@@ -3,12 +3,12 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 
 const OCR_TIMEOUT_MS = 90_000;
-const OCR_IDLE_TIMEOUT_MS = 2 * 60_000;
+const OCR_IDLE_TIMEOUT_MS = 10 * 60_000;
 const OCR_MAX_UPSCALED_SIDE = 1_920;
 const OCR_UPSCALE_THRESHOLD = 1_400;
 const OCR_MODEL_FILES = [
   "PP-OCRv5_mobile_det_infer.onnx",
-  "PP-OCRv5_server_rec_infer.onnx",
+  "PP-OCRv5_mobile_rec_infer.onnx",
   "ppocrv5_dict.txt",
 ] as const;
 
@@ -19,11 +19,17 @@ const CJK = "\\u2e80-\\u2eff\\u3000-\\u303f\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00
 const SPACE_BETWEEN_CJK = new RegExp(`([${CJK}])[ \\t]+(?=[${CJK}])`, "g");
 const SPACE_BEFORE_CJK_PUNCT = new RegExp(`[ \\t]+(?=[\\u3000-\\u303f\\uff00-\\uffef])`, "g");
 
-interface OcrWorkerRequest {
+interface OcrWorkerRecognizeRequest {
   type: "recognize";
   id: number;
   imagePath: string;
 }
+
+interface OcrWorkerWarmupRequest {
+  type: "warmup";
+}
+
+type OcrWorkerRequest = OcrWorkerRecognizeRequest | OcrWorkerWarmupRequest;
 
 interface OcrWorkerResponse {
   type: "result";
@@ -112,7 +118,7 @@ class PaddleOcrClient {
       }, OCR_TIMEOUT_MS);
       this.pending.set(id, { resolve, reject, timer });
       try {
-        const request: OcrWorkerRequest = { type: "recognize", id, imagePath };
+        const request: OcrWorkerRecognizeRequest = { type: "recognize", id, imagePath };
         worker.postMessage(request);
       } catch (error) {
         clearTimeout(timer);
@@ -120,6 +126,33 @@ class PaddleOcrClient {
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
+  }
+
+  warmup(): void {
+    try {
+      const modelDirectory = resolveModelDirectory();
+      if (OCR_MODEL_FILES.some((name) => !existsSync(path.join(modelDirectory, name)))) {
+        return;
+      }
+    } catch {
+      return;
+    }
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+    this.ensureWorker().then(
+      (worker) => {
+        try {
+          const request: OcrWorkerWarmupRequest = { type: "warmup" };
+          worker.postMessage(request);
+        } catch {
+          // Ignore: a failed warmup must never affect pending requests.
+        }
+        if (this.pending.size === 0) this.scheduleIdleStop();
+      },
+      () => {
+        // Ignore worker start failures; recognize() will surface real errors.
+      },
+    );
   }
 
   private ensureWorker(): Promise<UtilityProcess> {
@@ -207,4 +240,13 @@ const paddleOcr = new PaddleOcrClient();
 /** Recognize one local image using the bundled offline PP-OCRv5 models. */
 export function recognizeImageFile(imagePath: string): Promise<string> {
   return paddleOcr.recognize(imagePath);
+}
+
+/**
+ * Pre-start the OCR worker and load the models so the first recognition is
+ * fast. Idempotent and never throws: missing models return silently. Resets
+ * the idle timer, so the worker exits after OCR_IDLE_TIMEOUT_MS if unused.
+ */
+export function warmupOcr(): void {
+  paddleOcr.warmup();
 }

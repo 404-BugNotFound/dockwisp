@@ -1,4 +1,5 @@
 import {
+  app,
   BrowserWindow,
   clipboard,
   desktopCapturer,
@@ -8,22 +9,29 @@ import {
   nativeImage,
   screen,
 } from "electron";
-import { unlink, writeFile } from "node:fs/promises";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { translateText } from "../translation/providers";
 import { MouseHelper } from "./mouse-helper";
-import { ocrResizeDimensions, recognizeImageFile } from "./ocr";
+import { ocrResizeDimensions, recognizeImageFile, warmupOcr } from "./ocr";
 import { SettingsStore } from "./settings";
 
 interface ScreenshotState {
-  image: string;
+  imageUrl: string;
   width: number;
   height: number;
   scaleFactor: number;
+  // file:// native captures taint the canvas (blocking toDataURL); data URLs
+  // from the desktopCapturer fallback do not.
+  tainted: boolean;
 }
 
-const HIDE_DELAY_MS = 160;
+// A short settle delay after hiding a *visible* launcher so the compositor
+// drops it before the screenshot is taken. Skipped entirely when the launcher
+// was already hidden (the common hotkey path), which is the main latency win.
+const HIDE_DELAY_MS = 80;
 const DATA_URL_PREFIX = /^data:image\/[a-z.+-]+;base64,/i;
 
 const wait = (milliseconds: number): Promise<void> =>
@@ -44,11 +52,19 @@ function defaultSaveName(): string {
 /**
  * Owns the full-screen screenshot overlay: captures the display under the
  * cursor, shows a transparent selection window, and serves the copy / save /
- * OCR / translate actions the overlay invokes. One overlay at a time; a new
- * open() closes any previous one.
+ * OCR / translate actions the overlay invokes.
+ *
+ * The overlay window is created once (prewarmed) and reused: open() repositions
+ * the hidden window over the active display, pushes fresh state, and shows it
+ * once the renderer has repainted; close() hides it and tells the renderer to
+ * reset, rather than destroying it. The window is only rebuilt if its render
+ * process is gone. Capturing uses the native GDI helper (fast, no base64) and
+ * falls back to desktopCapturer when the helper is unavailable.
  */
 export class ScreenshotController {
   private overlay: BrowserWindow | null = null;
+  // Resolves when the (reused) overlay's page has finished loading.
+  private overlayLoaded: Promise<void> | null = null;
   private hotkey = "";
   private revealOverlay: (() => void) | null = null;
   private revealTimer: NodeJS.Timeout | null = null;
@@ -56,6 +72,9 @@ export class ScreenshotController {
   private captureToken = 0;
   private blurCloseArmed = false;
   private suppressBlurClose = false;
+  // Path of the native BMP temp file backing the current capture, or null when
+  // the desktopCapturer data-URL fallback was used.
+  private currentShotPath: string | null = null;
 
   constructor(
     private readonly launcher: BrowserWindow,
@@ -63,6 +82,22 @@ export class ScreenshotController {
     private readonly helper?: MouseHelper,
   ) {
     this.registerIpc();
+    app.once("before-quit", () => {
+      void this.cleanupShot();
+    });
+    // Prewarm the overlay on the next tick so the first hotkey press does not
+    // pay the window-creation + page-load cost.
+    setTimeout(() => this.prewarm(), 1_500).unref();
+  }
+
+  /** Build and load the hidden overlay ahead of time if it does not exist yet. */
+  prewarm(): void {
+    if (process.platform !== "win32") return;
+    try {
+      this.ensureOverlay();
+    } catch {
+      // Best-effort warmup; capture() will retry on demand.
+    }
   }
 
   /** Register the global screenshot hotkey; returns it on success, "" on failure. */
@@ -94,59 +129,57 @@ export class ScreenshotController {
     });
   }
 
-  private async capture(token: number): Promise<void> {
-    // Close any stale overlay so a repeated trigger never stacks windows or
-    // captures a previous overlay still on screen.
-    this.closeOverlay();
-    if (this.launcher && !this.launcher.isDestroyed()) this.launcher.hide();
-    await wait(HIDE_DELAY_MS);
-    if (token !== this.captureToken) return;
+  /** Create (if needed) the reusable hidden overlay window and start its load. */
+  private ensureOverlay(): BrowserWindow {
+    if (this.overlay && !this.overlay.isDestroyed()) return this.overlay;
 
-    const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
-    const thumbnailSize = {
-      width: Math.round(display.size.width * display.scaleFactor),
-      height: Math.round(display.size.height * display.scaleFactor),
-    };
-    const sources = await desktopCapturer.getSources({
-      types: ["screen"],
-      thumbnailSize,
-      fetchWindowIcons: false,
-    });
-    if (token !== this.captureToken) return;
-    if (sources.length === 0) throw new Error("没有可用的屏幕捕获源");
-    const source =
-      sources.find((item) => item.display_id === String(display.id)) ?? sources[0];
-    const thumbnail = source.thumbnail;
-    if (thumbnail.isEmpty()) throw new Error("屏幕捕获返回空图像");
-    const size = thumbnail.getSize();
-    // JPEG keeps the IPC payload small compared with a full-resolution PNG
-    // data URL for a 4K display.
-    const image = `data:image/jpeg;base64,${thumbnail.toJPEG(95).toString("base64")}`;
-
+    // Opaque on purpose: the overlay always paints a full-screen screenshot, and
+    // a transparent full-screen window forces per-frame alpha composition on
+    // Windows, which makes selection dragging lag behind the cursor.
     const overlay = new BrowserWindow({
-      x: display.bounds.x,
-      y: display.bounds.y,
-      width: display.bounds.width,
-      height: display.bounds.height,
+      width: 100,
+      height: 100,
       frame: false,
-      transparent: true,
-      backgroundColor: "#00000000",
+      transparent: false,
+      backgroundColor: "#000000",
       alwaysOnTop: true,
       skipTaskbar: true,
       resizable: false,
       fullscreenable: false,
       hasShadow: false,
+      roundedCorners: false,
+      thickFrame: false,
       show: false,
       webPreferences: {
         preload: path.join(__dirname, "..", "preload", "screenshot.js"),
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
+        // Keep timers/decoding running while the reusable overlay is hidden so
+        // the next capture is painted and ready without throttling delays.
+        backgroundThrottling: false,
       },
     });
     overlay.setAlwaysOnTop(true, "screen-saver");
+    if (this.helper) {
+      // Disable the DWM show/hide animation so the overlay appears instantly.
+      const handle = overlay.getNativeWindowHandle();
+      const nativeHandle =
+        handle.length >= 8 ? handle.readBigUInt64LE(0) : BigInt(handle.readUInt32LE(0));
+      void this.helper.prepareWindow(nativeHandle).catch(() => undefined);
+    }
     overlay.on("closed", () => {
-      if (this.overlay === overlay) this.overlay = null;
+      if (this.overlay === overlay) {
+        this.overlay = null;
+        this.overlayLoaded = null;
+      }
+    });
+    overlay.webContents.on("render-process-gone", () => {
+      // The window is unusable once its renderer dies; drop it so the next
+      // open() rebuilds a fresh overlay.
+      this.overlay = null;
+      this.overlayLoaded = null;
+      if (!overlay.isDestroyed()) overlay.destroy();
     });
     overlay.on("blur", () => {
       // Clicking another window dismisses the screenshot overlay. Native save
@@ -154,25 +187,71 @@ export class ScreenshotController {
       if (this.overlay !== overlay || !this.blurCloseArmed || this.suppressBlurClose) {
         return;
       }
+      if (!overlay.isVisible()) return;
       if (overlay.webContents.isDevToolsOpened()) return;
       this.closeOverlay();
     });
+
     this.overlay = overlay;
+    this.overlayLoaded = new Promise<void>((resolve) => {
+      overlay.webContents.once("did-finish-load", () => resolve());
+    });
+    void overlay.loadFile(
+      path.join(__dirname, "..", "renderer", "screenshot", "index.html"),
+    );
+    return overlay;
+  }
+
+  private async capture(token: number): Promise<void> {
+    // If an overlay is already on screen (repeated trigger), reset it first so
+    // we never capture a previous overlay or stack stale state.
+    if (this.overlay && !this.overlay.isDestroyed() && this.overlay.isVisible()) {
+      this.resetOverlay();
+    }
+
+    const launcherVisible =
+      !!this.launcher && !this.launcher.isDestroyed() && this.launcher.isVisible();
+    if (launcherVisible) {
+      this.launcher.hide();
+      // Only wait when the launcher was actually on screen and must be dropped
+      // from the capture; the hidden-launcher hotkey path skips this entirely.
+      await wait(HIDE_DELAY_MS);
+      if (token !== this.captureToken) return;
+    }
+
+    const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    const capture = await this.captureDisplay(display);
+    if (token !== this.captureToken) return;
+
+    const overlay = this.ensureOverlay();
+    await this.overlayLoaded;
+    if (token !== this.captureToken || overlay.isDestroyed()) return;
+
+    // Move/resize the hidden window onto the target display before showing.
+    overlay.setBounds({
+      x: display.bounds.x,
+      y: display.bounds.y,
+      width: display.bounds.width,
+      height: display.bounds.height,
+    });
+    overlay.setAlwaysOnTop(true, "screen-saver");
     this.blurCloseArmed = false;
     this.suppressBlurClose = false;
 
     const state: ScreenshotState = {
-      image,
-      width: size.width,
-      height: size.height,
+      imageUrl: capture.imageUrl,
+      width: capture.width,
+      height: capture.height,
       scaleFactor: display.scaleFactor,
+      tainted: capture.tainted,
     };
-    // Keep the window hidden until the renderer has decoded the image and
-    // painted it, so the user never sees a transparent/blank overlay. The
-    // renderer sends `screenshot:ready`; the timer is a safety net.
+
+    // Keep the window hidden until the renderer has decoded + painted the new
+    // image, so the user never sees a blank overlay or a stale previous frame.
+    // The renderer sends `screenshot:ready`; the timer is a safety net.
     let revealed = false;
     const reveal = (): void => {
-      if (revealed || overlay.isDestroyed()) return;
+      if (revealed || overlay.isDestroyed() || token !== this.captureToken) return;
       revealed = true;
       if (this.revealTimer) {
         clearTimeout(this.revealTimer);
@@ -193,21 +272,75 @@ export class ScreenshotController {
       setTimeout(() => {
         if (this.overlay === overlay && !overlay.isDestroyed()) this.blurCloseArmed = true;
       }, 400);
+      // Warm the OCR worker only after the overlay is on screen, so loading the
+      // model does not compete for CPU with capture and first paint.
+      setTimeout(() => warmupOcr(), 300);
     };
     this.revealOverlay = reveal;
-    overlay.webContents.once("did-finish-load", () => {
-      if (overlay.isDestroyed()) return;
-      overlay.webContents.send("screenshot:state", state);
-      this.revealTimer = setTimeout(reveal, 1_000);
-    });
-    void overlay.loadFile(
-      path.join(__dirname, "..", "renderer", "screenshot", "index.html"),
-    );
+    overlay.webContents.send("screenshot:state", state);
+    this.revealTimer = setTimeout(reveal, 1_000);
   }
 
-  private closeOverlay(): void {
-    const overlay = this.overlay;
-    this.overlay = null;
+  /**
+   * Capture the given display. Prefers the native GDI helper (fast, file-based,
+   * no base64); falls back to desktopCapturer as a JPEG data URL when the
+   * helper is unavailable or fails.
+   */
+  private async captureDisplay(
+    display: Electron.Display,
+  ): Promise<{ imageUrl: string; width: number; height: number; tainted: boolean }> {
+    await this.cleanupShot();
+
+    if (this.helper) {
+      try {
+        // DIP bounds → physical pixels for the target display.
+        const rect = screen.dipToScreenRect(null, display.bounds);
+        const result = await this.helper.captureScreen(
+          rect.x,
+          rect.y,
+          rect.width,
+          rect.height,
+        );
+        if (result) {
+          this.currentShotPath = result.path;
+          return {
+            imageUrl: pathToFileURL(result.path).toString(),
+            width: result.width,
+            height: result.height,
+            tainted: true,
+          };
+        }
+      } catch {
+        // Fall through to desktopCapturer.
+      }
+    }
+
+    // Fallback: desktopCapturer. Quality 90 keeps the payload reasonable.
+    const thumbnailSize = {
+      width: Math.round(display.size.width * display.scaleFactor),
+      height: Math.round(display.size.height * display.scaleFactor),
+    };
+    const sources = await desktopCapturer.getSources({
+      types: ["screen"],
+      thumbnailSize,
+      fetchWindowIcons: false,
+    });
+    if (sources.length === 0) throw new Error("没有可用的屏幕捕获源");
+    const source =
+      sources.find((item) => item.display_id === String(display.id)) ?? sources[0];
+    const thumbnail = source.thumbnail;
+    if (thumbnail.isEmpty()) throw new Error("屏幕捕获返回空图像");
+    const size = thumbnail.getSize();
+    return {
+      imageUrl: `data:image/jpeg;base64,${thumbnail.toJPEG(90).toString("base64")}`,
+      width: size.width,
+      height: size.height,
+      tainted: false,
+    };
+  }
+
+  /** Hide the overlay and reset the renderer's state without destroying it. */
+  private resetOverlay(): void {
     this.revealOverlay = null;
     this.blurCloseArmed = false;
     this.suppressBlurClose = false;
@@ -215,7 +348,23 @@ export class ScreenshotController {
       clearTimeout(this.revealTimer);
       this.revealTimer = null;
     }
-    if (overlay && !overlay.isDestroyed()) overlay.close();
+    const overlay = this.overlay;
+    if (overlay && !overlay.isDestroyed()) {
+      if (overlay.isVisible()) overlay.hide();
+      overlay.webContents.send("screenshot:reset");
+    }
+    void this.cleanupShot();
+  }
+
+  private closeOverlay(): void {
+    this.resetOverlay();
+  }
+
+  /** Delete the current native screenshot temp file, if any. */
+  private async cleanupShot(): Promise<void> {
+    const shot = this.currentShotPath;
+    this.currentShotPath = null;
+    if (shot) await unlink(shot).catch(() => undefined);
   }
 
   /** True when the IPC call came from the live overlay window. */
@@ -234,6 +383,19 @@ export class ScreenshotController {
 
     ipcMain.on("screenshot:ready", (event) => {
       if (this.fromOverlay(event)) this.revealOverlay?.();
+    });
+
+    ipcMain.handle("screenshot:image-bytes", async (event) => {
+      if (!this.fromOverlay(event)) return null;
+      const shot = this.currentShotPath;
+      if (!shot) return null;
+      try {
+        const buffer = await readFile(shot);
+        // Return a plain Uint8Array; Electron transfers it as binary (no base64).
+        return new Uint8Array(buffer);
+      } catch {
+        return null;
+      }
     });
 
     ipcMain.handle("screenshot:copy-image", async (event, dataUrl: unknown) => {
