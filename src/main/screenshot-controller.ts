@@ -165,7 +165,7 @@ export class ScreenshotController {
       return "";
     }
     try {
-      if (globalShortcut.register(trimmed, () => this.open())) {
+      if (globalShortcut.register(trimmed, () => this.open(false))) {
         this.hotkey = trimmed;
         return trimmed;
       }
@@ -176,9 +176,14 @@ export class ScreenshotController {
     return "";
   }
 
-  open(): void {
+  /**
+   * Start a capture. `hideLauncher` drops the launcher from the shot first; it
+   * is set when the capture is started from inside the launcher. The global
+   * hotkey leaves it alone so the launcher itself can be captured.
+   */
+  open(hideLauncher = false): void {
     const token = ++this.captureToken;
-    void this.capture(token).catch((error) => {
+    void this.capture(token, hideLauncher).catch((error) => {
       dialog.showErrorBox(
         "截图失败",
         error instanceof Error ? error.message : String(error),
@@ -259,7 +264,7 @@ export class ScreenshotController {
     return overlay;
   }
 
-  private async capture(token: number): Promise<void> {
+  private async capture(token: number, hideLauncher: boolean): Promise<void> {
     const timing = new CaptureTiming(this.lastOpenAt);
     this.lastOpenAt = Date.now();
     // No-op when the resident worker is already warm; restarts it if it died.
@@ -272,7 +277,10 @@ export class ScreenshotController {
     }
 
     const launcherVisible =
-      !!this.launcher && !this.launcher.isDestroyed() && this.launcher.isVisible();
+      hideLauncher &&
+      !!this.launcher &&
+      !this.launcher.isDestroyed() &&
+      this.launcher.isVisible();
     if (launcherVisible) {
       this.launcher.hide();
       // Only wait when the launcher was actually on screen and must be dropped

@@ -1342,7 +1342,6 @@ async function openSettings(page = "settings") {
   closeContextMenu();
   clearFilePoll();
   clearFileTags();
-  if (api && typeof api.setHubOpen === "function") api.setHubOpen(true);
   launcher.hidden = true;
   settingsPanel.hidden = false;
   lastResizeHeight = 0;
@@ -1392,7 +1391,6 @@ async function openSettings(page = "settings") {
 }
 
 function closeSettings() {
-  if (api && typeof api.setHubOpen === "function") api.setHubOpen(false);
   settingsPanel.hidden = true;
   launcher.hidden = false;
   lastResizeHeight = 0;
@@ -1721,10 +1719,7 @@ if (openReleaseButton) {
 
 /* ---------- events ---------- */
 api.onFocus((point) => {
-  if (!settingsPanel.hidden) {
-    if (api && typeof api.setHubOpen === "function") api.setHubOpen(true);
-    return;
-  }
+  if (!settingsPanel.hidden) return;
   closeContextMenu();
   // The main process passes the current cursor point in screen coordinates.
   // Seeding the baseline here means the first real mouse movement can select a

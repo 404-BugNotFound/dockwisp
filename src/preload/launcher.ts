@@ -24,7 +24,6 @@ contextBridge.exposeInMainWorld("dockwisp", {
   dragMove: (screenX: number, screenY: number) =>
     ipcRenderer.send("launcher:drag-move", screenX, screenY),
   dragEnd: () => ipcRenderer.send("launcher:drag-end"),
-  setHubOpen: (open: boolean) => ipcRenderer.send("launcher:hub-open", open),
   resize: (height: number, width?: number) =>
     ipcRenderer.send("launcher:resize", height, width),
   addPaths: (paths: string[]) => ipcRenderer.invoke("launcher:add-paths", paths),

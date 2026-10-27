@@ -412,7 +412,7 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
     subtitle: "打开命令提示符终端",
     keywords: ["终端", "命令提示符", "cmd", "terminal"],
     aliases: ["命令提示符", "Command Prompt"],
-    run: { type: "exe", target: system32("cmd.exe") },
+    run: { type: "path", target: system32("cmd.exe") },
   },
   {
     id: "powershell",
@@ -421,7 +421,7 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
     keywords: ["powershell", "ps", "命令行"],
     aliases: ["Windows PowerShell"],
     run: {
-      type: "exe",
+      type: "path",
       target: path.join(
         process.env.SystemRoot ?? "C:\\Windows",
         "System32",
@@ -1034,11 +1034,21 @@ function pluginDescription(plugin: LoadedPlugin): string {
   return [...new Set(descriptions)].slice(0, 2).join(" · ");
 }
 
+/** Files that already are the icon; the shell would return their file-type handler's icon instead. */
+const IMAGE_ICON_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".bmp", ".gif", ".ico"]);
+
 async function appIconUrl(filePath: string): Promise<string | undefined> {
   if (!filePath || !existsSync(filePath)) return undefined;
   const cached = iconCache.get(filePath);
   if (cached) return cached;
   try {
+    if (IMAGE_ICON_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
+      const image = nativeImage.createFromPath(filePath);
+      if (image.isEmpty()) return undefined;
+      const url = image.toDataURL();
+      iconCache.set(filePath, url);
+      return url;
+    }
     // Shell shortcut icons are often the generic .lnk page + arrow. Resolve the
     // target (or the shortcut's explicit icon) so the result shows the app icon.
     let iconSource = filePath;
@@ -1258,7 +1268,7 @@ async function createTray(): Promise<void> {
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: "打开 Dockwisp", click: () => summonLauncher() },
-      { label: "截图", click: () => void screenshot?.open() },
+      { label: "截图", click: () => void screenshot?.open(true) },
       { label: "设置", click: () => summonLauncher(true) },
       { type: "separator" },
       {
@@ -1312,20 +1322,22 @@ void app.whenReady().then(async () => {
     launcher?.webContents.send("launcher:index-updated");
   });
 
-  let launcherHubOpen = false;
-  launcher = createLauncherWindow(() => launcherHubOpen);
+  let launcherDialogDepth = 0;
+  // Native dialogs parented to the launcher blur it; keep it open meanwhile.
+  const withLauncherDialog = async <T>(show: () => Promise<T>): Promise<T> => {
+    launcherDialogDepth += 1;
+    try {
+      return await show();
+    } finally {
+      launcherDialogDepth -= 1;
+    }
+  };
+  launcher = createLauncherWindow(() => launcherDialogDepth > 0);
   launcher.on("close", (event) => {
     if (!quitting) {
       event.preventDefault();
       launcher?.hide();
     }
-  });
-  launcher.on("hide", () => {
-    launcherHubOpen = false;
-  });
-  ipcMain.on("launcher:hub-open", (event, open: unknown) => {
-    if (!launcher || launcher.isDestroyed() || event.sender !== launcher.webContents) return;
-    launcherHubOpen = open === true;
   });
 
   // Persist the launcher position when the user drags it. Debounced so a drag
@@ -1540,7 +1552,14 @@ void app.whenReady().then(async () => {
     const pinned = settingsStore.get().pinnedMatches;
     const live = pinned
       .map((snapshot, index) => pinnedToMatch(snapshot, index))
-      .filter((item): item is SearchMatch => item !== null);
+      .filter((item): item is SearchMatch => item !== null)
+      .map((item) => {
+        // Snapshots do not store icons; reuse the indexed app's icon (UWP logos).
+        if (item.kind !== "app" || item.iconPath) return item;
+        const key = item.path.toLowerCase();
+        const indexed = applications.find((entry) => entry.path.toLowerCase() === key);
+        return indexed?.iconPath ? { ...item, iconPath: indexed.iconPath } : item;
+      });
     rememberMatches(live);
     return serializeMatches(live);
   };
@@ -1684,14 +1703,14 @@ void app.whenReady().then(async () => {
       case "restart": {
         const isShutdown = commandId === "shutdown";
         const confirmLabel = isShutdown ? "关机" : "重启";
-        const result = await dialog.showMessageBox(launcher!, {
+        const result = await withLauncherDialog(() => dialog.showMessageBox(launcher!, {
           type: "warning",
           buttons: ["取消", confirmLabel],
           defaultId: 0,
           cancelId: 0,
           title: "确认操作",
           message: isShutdown ? "确定要关闭电脑吗？" : "确定要重新启动电脑吗？",
-        });
+        }));
         if (result.response !== 1) return;
         spawnDetached("shutdown.exe", [isShutdown ? "/s" : "/r", "/t", "0"]);
         launcher?.hide();
@@ -1723,7 +1742,7 @@ void app.whenReady().then(async () => {
   ipcMain.on("builtin:open", (event, id: unknown) => {
     if (!launcher || event.sender !== launcher.webContents) return;
     launcher.hide();
-    if (id === "builtin:screenshot") void screenshotController.open();
+    if (id === "builtin:screenshot") void screenshotController.open(true);
     else if (id === "builtin:hosts") hostsController.open();
     else if (id === "builtin:diff") diffController.open();
     else if (id === "builtin:convert") convertController.open();
@@ -1738,7 +1757,7 @@ void app.whenReady().then(async () => {
 
   ipcMain.on("screenshot:start", (event) => {
     if (!launcher || event.sender !== launcher.webContents) return;
-    void screenshotController.open();
+    void screenshotController.open(true);
   });
 
   ipcMain.handle("plugins:list", () => {
@@ -2054,7 +2073,7 @@ void app.whenReady().then(async () => {
       }
       if (match.action === "screenshot") {
         launcher?.hide();
-        void screenshotController.open();
+        void screenshotController.open(true);
         return { ok: true, hide: true };
       }
       if (match.action === "hosts") {
@@ -2439,10 +2458,10 @@ void app.whenReady().then(async () => {
     return { ...next, registeredHotkey, registeredScreenshotHotkey };
   });
   ipcMain.handle("launcher:add-plugin-directory", async () => {
-    const result = await dialog.showOpenDialog(launcher!, {
+    const result = await withLauncherDialog(() => dialog.showOpenDialog(launcher!, {
       title: "选择包含 plugin.json 的插件目录",
       properties: ["openDirectory"],
-    });
+    }));
     if (result.canceled || !result.filePaths[0]) return false;
     const directory = result.filePaths[0];
     const current = settingsStore.get();
@@ -2455,24 +2474,24 @@ void app.whenReady().then(async () => {
     return true;
   });
   ipcMain.handle("launcher:install-plugin-package", async () => {
-    const result = await dialog.showOpenDialog(launcher!, {
+    const result = await withLauncherDialog(() => dialog.showOpenDialog(launcher!, {
       title: "安装离线插件包",
       properties: ["openFile"],
       filters: [{ name: "离线插件包", extensions: ["upx", "upxs"] }],
-    });
+    }));
     if (result.canceled || !result.filePaths[0]) return null;
     const installed = await packageInstaller.install(result.filePaths[0]);
     registry.reload();
     return installed;
   });
   ipcMain.handle("launcher:add-custom-item", async () => {
-    const result = await dialog.showOpenDialog(launcher!, {
+    const result = await withLauncherDialog(() => dialog.showOpenDialog(launcher!, {
       title: "添加本地应用",
       properties: ["openFile", "multiSelections"],
       filters: [
         { name: "应用程序", extensions: ["exe", "lnk", "url", "appref-ms"] },
       ],
-    });
+    }));
     if (result.canceled) return { added: [], skipped: [] };
     const merged = addCustomItems(result.filePaths, {
       applications: true,
@@ -2481,10 +2500,10 @@ void app.whenReady().then(async () => {
     return { added: merged.added, skipped: merged.skipped };
   });
   ipcMain.handle("launcher:add-custom-directory", async () => {
-    const result = await dialog.showOpenDialog(launcher!, {
+    const result = await withLauncherDialog(() => dialog.showOpenDialog(launcher!, {
       title: "添加索引目录",
       properties: ["openDirectory", "multiSelections"],
-    });
+    }));
     if (result.canceled) return { added: [], skipped: [] };
     const merged = addCustomItems(result.filePaths, {
       applications: false,
