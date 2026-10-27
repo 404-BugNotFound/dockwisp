@@ -47,7 +47,12 @@ import { buildApplicationIndex } from "./app-index";
 import { hasPeIcon, loadPeIcon } from "./exe-icon";
 import { englishTranslateScore, matchBuiltinFeatures } from "../core/builtin-features";
 import { TranslateWindowController } from "./translate-window-controller";
-import { isShellAppPath } from "../core/start-apps";
+import {
+  isShellAppPath,
+  isUwpAppId,
+  resolveKnownFolderPath,
+  shellAppTarget,
+} from "../core/start-apps";
 import { loadCachedStartApps, openShellApp, refreshStartApps } from "./start-apps";
 import { registerUpdater } from "./updater";
 import { diagLog } from "./diag-log";
@@ -1530,6 +1535,40 @@ void app.whenReady().then(async () => {
     fileSearch.invalidate();
   };
 
+  /**
+   * Whether an app/file result points at something that no longer exists: a
+   * deleted file, a shortcut whose target was uninstalled, or a KnownFolder
+   * Start App whose executable is gone. UWP ids cannot be checked cheaply and
+   * network targets could block, so both count as valid.
+   */
+  const isStaleTarget = (filePath: string): boolean => {
+    if (isShellAppPath(filePath)) {
+      const appId = shellAppTarget(filePath);
+      if (isUwpAppId(appId)) return false;
+      const resolved = resolveKnownFolderPath(appId);
+      return resolved ? !existsSync(resolved) : false;
+    }
+    if (!existsSync(filePath)) return true;
+    if (path.extname(filePath).toLowerCase() !== ".lnk") return false;
+    try {
+      const target = shell.readShortcutLink(filePath).target;
+      return Boolean(
+        target && path.isAbsolute(target) && !target.startsWith("\\\\") && !existsSync(target),
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  /** Drop a stale result from the current session; a restart re-indexes. */
+  const pruneStaleMatch = (match: AppMatch | FileMatch): string => {
+    lastMatches.delete(match.id);
+    const key = match.path.toLowerCase();
+    applications = applications.filter((entry) => entry.path.toLowerCase() !== key);
+    if (match.kind === "file") fileSearch.invalidate();
+    return `「${match.title}」已失效（可能已卸载或删除），已从结果中移除`;
+  };
+
   const addCustomItems = (
     rawPaths: string[],
     options: MergeCustomItemOptions,
@@ -2043,6 +2082,9 @@ void app.whenReady().then(async () => {
       usage.record(match.id);
     }
     if (match.kind === "file" || match.kind === "app") {
+      if (isStaleTarget(match.path)) {
+        return { removed: match.id, message: pruneStaleMatch(match) };
+      }
       if (match.kind === "app" && isShellAppPath(match.path)) {
         openShellApp(match.path);
         launcher?.hide();
@@ -2206,12 +2248,15 @@ void app.whenReady().then(async () => {
       _event,
       id: string,
       action: "open" | "reveal" | "copy-path" | "copy-name" | "run-as-admin" | "preview",
-    ): Promise<{ ok: boolean; message?: string; hide?: boolean }> => {
+    ): Promise<{ ok: boolean; message?: string; hide?: boolean; removed?: string }> => {
       const match = lastMatches.get(id);
       if (!match || (match.kind !== "app" && match.kind !== "file")) {
         return { ok: false, message: "仅支持应用或文件" };
       }
       const original = match.path;
+      if (action !== "copy-name" && action !== "copy-path" && isStaleTarget(original)) {
+        return { ok: false, removed: match.id, message: pruneStaleMatch(match) };
+      }
       if (isShellAppPath(original)) {
         if (action === "open") {
           openShellApp(original);

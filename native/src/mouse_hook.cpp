@@ -31,8 +31,9 @@ constexpr const wchar_t* kRemoteDesktopProcesses[] = {
     L"mstsc.exe",          L"msrdc.exe",        L"vmconnect.exe",
     L"gameviewer.exe",     L"uuremote.exe",     L"todesk.exe",
     L"todesk_session.exe", L"sunloginclient.exe", L"sunloginremote.exe",
-    L"anydesk.exe",        L"teamviewer.exe",   L"rustdesk.exe",
-    L"parsecd.exe",        L"vncviewer.exe",    L"tvnviewer.exe",
+    L"awesun.exe",         L"anydesk.exe",      L"teamviewer.exe",
+    L"rustdesk.exe",       L"parsecd.exe",      L"vncviewer.exe",
+    L"tvnviewer.exe",
 };
 
 bool foreground_is_remote_desktop() {

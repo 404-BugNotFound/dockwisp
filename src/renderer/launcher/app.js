@@ -460,7 +460,7 @@ function renderHome() {
     label.className = "home-label";
     label.textContent = match.title;
     item.append(label);
-    item.addEventListener("click", () => api.execute(match.id));
+    item.addEventListener("click", () => void executeMatch(match));
     item.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       openContextMenu(match, event.clientX, event.clientY);
@@ -743,10 +743,31 @@ async function runConvertTo(match) {
 async function executeMatch(match) {
   if (!match) return;
   try {
-    await api.execute(match.id);
+    const result = await api.execute(match.id);
+    handleRemovedResult(result);
   } catch (error) {
     showToast(error.message || String(error));
   }
+}
+
+// The main process reports a result whose target vanished (uninstalled or
+// deleted); drop it from the visible list and the home grid right away.
+function handleRemovedResult(result) {
+  if (!result || !result.removed) return false;
+  const id = result.removed;
+  const index = matches.findIndex((match) => match.id === id);
+  if (index >= 0) {
+    matches.splice(index, 1);
+    if (selected >= matches.length) selected = Math.max(0, matches.length - 1);
+    if (!results.hidden) showResults();
+  }
+  const homeIndex = homeMatches.findIndex((match) => match.id === id);
+  if (homeIndex >= 0) {
+    homeMatches.splice(homeIndex, 1);
+    if (!home.hidden) showEmptyHome();
+  }
+  showToast(result.message);
+  return true;
 }
 
 function selectBy(offset) {
@@ -812,6 +833,7 @@ async function handleContextAction(match, action) {
   // File/app actions: open, reveal, copy-path, copy-name, run-as-admin.
   try {
     const result = await api.itemAction(match.id, action);
+    if (handleRemovedResult(result)) return;
     if (result && result.message) {
       showToast(result.message);
     } else if (result && result.ok === false) {
