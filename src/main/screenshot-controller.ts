@@ -36,6 +36,9 @@ const DATA_URL_PREFIX = /^data:image\/[a-z.+-]+;base64,/i;
 // After show(), how long to wait for the renderer to confirm it painted a frame
 // before moving the overlay on-screen anyway.
 const PAINT_TIMEOUT_MS = 250;
+// Hotkey triggers closer together than this are keyboard auto-repeat from a
+// held key. Covers the Windows repeat delay (250–1000ms, default ~500ms).
+const HOTKEY_REPEAT_GAP_MS = 1_100;
 
 /** A position to the right of every display, so a shown window is not visible. */
 function offscreenOrigin(): { x: number; y: number } {
@@ -130,6 +133,7 @@ export class ScreenshotController {
   // the desktopCapturer data-URL fallback was used.
   private currentShotPath: string | null = null;
   private lastOpenAt = 0;
+  private lastHotkeyAt = 0;
 
   constructor(
     private readonly launcher: BrowserWindow,
@@ -165,7 +169,7 @@ export class ScreenshotController {
       return "";
     }
     try {
-      if (globalShortcut.register(trimmed, () => this.open(false))) {
+      if (globalShortcut.register(trimmed, () => this.onHotkey())) {
         this.hotkey = trimmed;
         return trimmed;
       }
@@ -174,6 +178,20 @@ export class ScreenshotController {
     }
     this.hotkey = "";
     return "";
+  }
+
+  /**
+   * Holding the hotkey makes Windows auto-repeat it every ~30ms; each repeat
+   * would restart the capture, so the overlay never appears until release.
+   * Triggers that follow the previous one within HOTKEY_REPEAT_GAP_MS are
+   * treated as auto-repeat and ignored.
+   */
+  private onHotkey(): void {
+    const now = Date.now();
+    const isRepeat = now - this.lastHotkeyAt < HOTKEY_REPEAT_GAP_MS;
+    this.lastHotkeyAt = now;
+    if (isRepeat) return;
+    this.open(false);
   }
 
   /**
