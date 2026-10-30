@@ -1,6 +1,6 @@
 {
   "name": "dockwisp",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "private": true,
   "description": "A clean-room Windows launcher with a plugin host.",
   "author": "Dockwisp contributors",
