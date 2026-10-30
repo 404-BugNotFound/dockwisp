@@ -14,7 +14,6 @@ const api = window.screenshot || {
   painted() {},
   close() {},
   ready() {},
-  async imageBytes() { return null; },
   async copyImage() { return false; },
   async saveImage() { return null; },
   async ocr() { return ""; },
@@ -46,6 +45,7 @@ const panelText = document.getElementById("panelText");
 const panelFoot = document.getElementById("panelFoot");
 
 const octx = anno.getContext("2d");
+const sctx = shot.getContext("2d", { alpha: false });
 
 /* ------------------------------ 状态 ------------------------------ */
 
@@ -54,10 +54,7 @@ const MIN_SELECTION_CSS = 8; // 选区过小（CSS px）不生效
 let imageReady = false;
 let stateToken = 0; // 每轮截图递增，用于丢弃过期的图片解码结果
 let annoDirty = false; // 标注层是否需要重绘（选区拖动时不必重绘全分辨率画布）
-let baseImage = null; // 已加载的原图 <img>/Image（显示用；file:// 源会污染画布）
-let cleanBase = null; // 导出用的未污染位图（污染时按需从原始字节解码）
-let imageTainted = false; // 当前 baseImage 是否会污染画布（file:// 原生截图）
-let cleanBasePromise = null; // 正在解码 cleanBase 的 Promise（避免并发重复解码）
+let baseImage = null; // 当前截图的原图来源（即 #shot 画布，同源可导出）
 let natW = 0; // 图片原始宽（像素）
 let natH = 0; // 图片原始高（像素）
 
@@ -107,13 +104,26 @@ function clamp(v, lo, hi) {
 /* --------------------------- 初始化 --------------------------- */
 
 api.onState((state) => {
-  if (!state || typeof state.imageUrl !== "string") return;
+  if (!state || (!state.pixels && typeof state.imageUrl !== "string")) return;
   // 新一轮截图：先彻底重置上一轮的所有状态，避免复用窗口残留。
   resetAll();
   viewW = window.innerWidth;
   viewH = window.innerHeight;
-  imageTainted = state.tainted === true;
   const token = ++stateToken;
+
+  if (state.pixels) {
+    // 原生截图：原始 RGBA 像素直接写入画布，无需任何图片解码。
+    try {
+      const bytes = state.pixels;
+      const data = new Uint8ClampedArray(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      showBase(new ImageData(data, state.width, state.height), state.width, state.height);
+    } catch {
+      // 尺寸不符等异常也要通知，否则窗口会一直隐藏卡住。
+    }
+    notifyReady();
+    return;
+  }
+
   const img = new Image();
   img.src = state.imageUrl;
   // decode() 在后台线程解码，避免把大图解码压在首帧绘制上。
@@ -122,28 +132,32 @@ api.onState((state) => {
     .catch(() => undefined)
     .then(() => {
       if (token !== stateToken) return;
-      if (!img.naturalWidth) {
-        // 解码失败也要通知，否则窗口会一直隐藏卡住。
-        notifyReady();
-        return;
-      }
-      baseImage = img;
-      natW = img.naturalWidth || state.width;
-      natH = img.naturalHeight || state.height;
-      if (anno.width !== natW || anno.height !== natH) {
-        anno.width = natW;
-        anno.height = natH;
-      } else {
-        octx.clearRect(0, 0, natW, natH);
-      }
-      annoDirty = false;
-      shot.src = img.src;
-      imageReady = true;
-      render();
-      // 首帧绘制完成后再通知主进程显示窗口，避免空屏或旧帧闪烁。
+      if (img.naturalWidth) showBase(img, img.naturalWidth, img.naturalHeight);
       notifyReady();
     });
 });
+
+/** 把本轮截图画到 #shot 画布上；该画布同时作为马赛克和导出的原图（同源，不污染）。 */
+function showBase(source, width, height) {
+  natW = width;
+  natH = height;
+  for (const canvas of [shot, anno]) {
+    if (canvas.width !== natW || canvas.height !== natH) {
+      canvas.width = natW;
+      canvas.height = natH;
+    }
+  }
+  if (source instanceof ImageData) {
+    sctx.putImageData(source, 0, 0);
+  } else {
+    sctx.drawImage(source, 0, 0, natW, natH);
+  }
+  octx.clearRect(0, 0, natW, natH);
+  annoDirty = false;
+  baseImage = shot;
+  imageReady = true;
+  render();
+}
 
 // 窗口已在屏幕外显示：等两帧确保新画面已真正提交，再让主进程移回屏幕内，避免黑帧。
 api.onShown(() => {
@@ -168,8 +182,10 @@ api.onRevealed(() => {
 api.onReset(() => {
   stateToken += 1;
   resetAll();
-  shot.removeAttribute("src");
-  if (natW > 0 && natH > 0) octx.clearRect(0, 0, natW, natH);
+  if (natW > 0 && natH > 0) {
+    sctx.clearRect(0, 0, natW, natH);
+    octx.clearRect(0, 0, natW, natH);
+  }
   annoDirty = false;
   render();
 });
@@ -178,9 +194,6 @@ api.onReset(() => {
 function resetAll() {
   imageReady = false;
   baseImage = null;
-  cleanBase = null;
-  cleanBasePromise = null;
-  imageTainted = false;
   selection = null;
   selectionVersion += 1; // 使任何在途的 OCR/翻译结果过期
   annotations = [];
@@ -674,27 +687,6 @@ function positionToolbar(hasSel) {
 
 /* --------------------------- 导出选区 PNG --------------------------- */
 
-/**
- * 确保有一份“未污染”的原图可供导出。file:// 原生截图会污染画布，导致
- * toDataURL 抛 SecurityError；此时从主进程取原始字节，经 Blob→ImageBitmap
- * 重新解码出同源位图。仅在首次导出时付出一次代价，之后缓存复用。
- */
-async function ensureCleanBase() {
-  if (!imageTainted) return baseImage;
-  if (cleanBase) return cleanBase;
-  if (!cleanBasePromise) {
-    cleanBasePromise = (async () => {
-      const bytes = await api.imageBytes();
-      if (!bytes) throw new Error("无法读取截图数据");
-      const blob = new Blob([bytes], { type: "image/bmp" });
-      const bitmap = await createImageBitmap(blob);
-      cleanBase = bitmap;
-      return bitmap;
-    })();
-  }
-  return cleanBasePromise;
-}
-
 async function exportSelectionPng(includeAnnotations = true) {
   if (!selection || selection.w < 1 || selection.h < 1) return null;
   const w = Math.max(1, Math.round(selection.w));
@@ -702,8 +694,7 @@ async function exportSelectionPng(includeAnnotations = true) {
   const sx = Math.round(selection.x);
   const sy = Math.round(selection.y);
 
-  // 污染路径：先拿到未污染位图，再合成，保证 toDataURL 不抛异常。
-  const base = imageTainted ? await ensureCleanBase() : baseImage;
+  const base = baseImage;
 
   const out = document.createElement("canvas");
   out.width = w;

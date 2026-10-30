@@ -14,7 +14,7 @@
   <body>
     <div id="root" data-mode="idle" data-entering="true">
       <!-- 清晰的全屏截图 -->
-      <img id="shot" alt="" draggable="false" />
+      <canvas id="shot"></canvas>
       <!-- 标注层：backing store 为图片原始尺寸 -->
       <canvas id="anno"></canvas>
       <!-- 无选区时的整屏暗化 -->
@@ -77,11 +77,11 @@
         <div class="tb-group">
           <button class="tb-text" id="ocr" type="button">识别</button>
           <button class="tb-text" id="translate" type="button">翻译</button>
-          <button class="tb-text" id="copy" type="button" title="复制并关闭 (Enter)">复制</button>
           <button class="tb-text" id="save" type="button">保存</button>
           <button class="tb-btn danger" id="close" type="button" title="关闭 (Esc)" aria-label="关闭">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6 L18 18 M18 6 L6 18" /></svg>
           </button>
+          <button class="tb-text" id="copy" type="button" title="复制并关闭 (Enter)">复制</button>
         </div>
       </div>
 

@@ -9,23 +9,32 @@ import {
   nativeImage,
   screen,
 } from "electron";
-import { appendFile, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { translateText } from "../translation/providers";
 import { MouseHelper } from "./mouse-helper";
 import { ocrResizeDimensions, recognizeImageFile, warmupOcr } from "./ocr";
 import { SettingsStore } from "./settings";
 
 interface ScreenshotState {
-  imageUrl: string;
+  // Native captures send raw top-down RGBA pixels (no encoding, no file);
+  // the desktopCapturer fallback sends a JPEG data URL.
+  pixels?: Uint8Array;
+  imageUrl?: string;
   width: number;
   height: number;
   scaleFactor: number;
-  // file:// native captures taint the canvas (blocking toDataURL); data URLs
-  // from the desktopCapturer fallback do not.
-  tainted: boolean;
+}
+
+interface CaptureOutput {
+  pixels?: Uint8Array;
+  imageUrl?: string;
+  width: number;
+  height: number;
+  native: boolean;
+  // Extra stage timings for the diagnostics log.
+  detail: string;
 }
 
 // A short settle delay after hiding a *visible* launcher so the compositor
@@ -129,9 +138,6 @@ export class ScreenshotController {
   private captureToken = 0;
   private blurCloseArmed = false;
   private suppressBlurClose = false;
-  // Path of the native BMP temp file backing the current capture, or null when
-  // the desktopCapturer data-URL fallback was used.
-  private currentShotPath: string | null = null;
   private lastOpenAt = 0;
   private lastHotkeyAt = 0;
 
@@ -141,9 +147,6 @@ export class ScreenshotController {
     private readonly helper?: MouseHelper,
   ) {
     this.registerIpc();
-    app.once("before-quit", () => {
-      void this.cleanupShot();
-    });
     // Prewarm the overlay on the next tick so the first hotkey press does not
     // pay the window-creation + page-load cost.
     setTimeout(() => this.prewarm(), 1_500).unref();
@@ -311,7 +314,7 @@ export class ScreenshotController {
     const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     const capture = await this.captureDisplay(display);
     if (token !== this.captureToken) return;
-    timing.mark(capture.tainted ? "captureGdi" : "captureFallback");
+    timing.mark(capture.native ? "captureGdi" : "captureFallback");
 
     const overlayExisted = !!this.overlay && !this.overlay.isDestroyed();
     const overlay = this.ensureOverlay();
@@ -338,11 +341,10 @@ export class ScreenshotController {
     this.suppressBlurClose = false;
 
     const state: ScreenshotState = {
-      imageUrl: capture.imageUrl,
+      ...(capture.pixels ? { pixels: capture.pixels } : { imageUrl: capture.imageUrl }),
       width: capture.width,
       height: capture.height,
       scaleFactor: display.scaleFactor,
-      tainted: capture.tainted,
     };
 
     let placed = false;
@@ -359,7 +361,7 @@ export class ScreenshotController {
       overlay.focus();
       overlay.webContents.send("screenshot:revealed");
       timing.mark("shown");
-      timing.write(`${capture.width}x${capture.height}`);
+      timing.write(`${capture.width}x${capture.height} ${capture.detail}`.trimEnd());
       // A background process may not be allowed to take the foreground from a
       // global hotkey; ask the native helper to activate the overlay.
       if (this.helper) {
@@ -393,15 +395,11 @@ export class ScreenshotController {
   }
 
   /**
-   * Capture the given display. Prefers the native GDI helper (fast, file-based,
-   * no base64); falls back to desktopCapturer as a JPEG data URL when the
-   * helper is unavailable or fails.
+   * Capture the given display. Prefers the native GDI helper (raw pixels over a
+   * named pipe, no file, no encoding); falls back to desktopCapturer as a JPEG
+   * data URL when the helper is unavailable or fails.
    */
-  private async captureDisplay(
-    display: Electron.Display,
-  ): Promise<{ imageUrl: string; width: number; height: number; tainted: boolean }> {
-    await this.cleanupShot();
-
+  private async captureDisplay(display: Electron.Display): Promise<CaptureOutput> {
     if (this.helper) {
       try {
         // DIP bounds → physical pixels for the target display.
@@ -413,12 +411,13 @@ export class ScreenshotController {
           rect.height,
         );
         if (result) {
-          this.currentShotPath = result.path;
+          const { blt, dib, send, total } = result.timings;
           return {
-            imageUrl: pathToFileURL(result.path).toString(),
+            pixels: new Uint8Array(result.pixels.buffer, result.pixels.byteOffset, result.pixels.length),
             width: result.width,
             height: result.height,
-            tainted: true,
+            native: true,
+            detail: `blt=${blt} dib=${dib} pipe=${send} helper=${total}`,
           };
         }
       } catch {
@@ -446,7 +445,8 @@ export class ScreenshotController {
       imageUrl: `data:image/jpeg;base64,${thumbnail.toJPEG(90).toString("base64")}`,
       width: size.width,
       height: size.height,
-      tainted: false,
+      native: false,
+      detail: "",
     };
   }
 
@@ -465,18 +465,10 @@ export class ScreenshotController {
       if (overlay.isVisible()) overlay.hide();
       overlay.webContents.send("screenshot:reset");
     }
-    void this.cleanupShot();
   }
 
   private closeOverlay(): void {
     this.resetOverlay();
-  }
-
-  /** Delete the current native screenshot temp file, if any. */
-  private async cleanupShot(): Promise<void> {
-    const shot = this.currentShotPath;
-    this.currentShotPath = null;
-    if (shot) await unlink(shot).catch(() => undefined);
   }
 
   /** True when the IPC call came from the live overlay window. */
@@ -499,19 +491,6 @@ export class ScreenshotController {
 
     ipcMain.on("screenshot:painted", (event) => {
       if (this.fromOverlay(event)) this.placeOverlay?.();
-    });
-
-    ipcMain.handle("screenshot:image-bytes", async (event) => {
-      if (!this.fromOverlay(event)) return null;
-      const shot = this.currentShotPath;
-      if (!shot) return null;
-      try {
-        const buffer = await readFile(shot);
-        // Return a plain Uint8Array; Electron transfers it as binary (no base64).
-        return new Uint8Array(buffer);
-      } catch {
-        return null;
-      }
     });
 
     ipcMain.handle("screenshot:copy-image", async (event, dataUrl: unknown) => {

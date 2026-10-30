@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync, statSync, unlinkSync } from "node:fs";
+import { createServer } from "node:net";
+
+let pipeServer = null;
+let pipeBytes = -1;
 
 const child = spawn("native/bin/mouse-hook.exe", [], {
   cwd: process.cwd(),
@@ -34,24 +37,28 @@ lines.on("line", (line) => {
     child.stdin.write("seq 4\n");
   } else if (message.id === "4" && message.ok && Number.isInteger(message.sequence)) {
     seen.add("sequence");
-    // GDI capture of a small top-left rectangle; verify the helper writes a
-    // non-empty BMP and clean it up.
-    child.stdin.write("capture 5 0 0 64 64\n");
+    // GDI capture of a small top-left rectangle streamed over a named pipe;
+    // verify the helper delivers exactly 64*64 RGBA bytes.
+    const pipeName = `dockwisp-test-${process.pid}`;
+    const server = createServer((socket) => {
+      let received = 0;
+      socket.on("data", (chunk) => {
+        received += chunk.length;
+      });
+      socket.on("end", () => {
+        pipeBytes = received;
+      });
+    });
+    server.listen(`\\\\.\\pipe\\${pipeName}`, () => {
+      child.stdin.write(`capture 5 0 0 64 64 ${pipeName}\n`);
+    });
+    pipeServer = server;
   } else if (message.id === "5") {
-    if (
-      message.ok &&
-      typeof message.path === "string" &&
-      existsSync(message.path) &&
-      statSync(message.path).size > 0
-    ) {
-      seen.add("capture");
-      try {
-        unlinkSync(message.path);
-      } catch {
-        // Best-effort cleanup; the OS temp directory is purged eventually.
-      }
-    }
-    child.stdin.write("hotkey 6 0\n");
+    setTimeout(() => {
+      if (message.ok && pipeBytes === 64 * 64 * 4) seen.add("capture");
+      pipeServer?.close();
+      child.stdin.write("hotkey 6 0\n");
+    }, 200);
   } else if (message.id === "6" && message.ok) {
     seen.add("hotkey-off");
     child.stdin.write("quit 7\n");

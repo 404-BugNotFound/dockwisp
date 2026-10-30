@@ -1,5 +1,7 @@
 import { EventEmitter } from "node:events";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
+import { createServer } from "node:net";
 import path from "node:path";
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import readline from "node:readline";
@@ -23,15 +25,36 @@ interface HelperResponse {
   text?: string;
   error?: string;
   windows?: WindowInfo[];
-  path?: string;
   width?: number;
   height?: number;
+  bltMs?: number;
+  dibMs?: number;
+  sendMs?: number;
 }
 
 export interface CaptureResult {
-  path: string;
+  /** Raw top-down RGBA pixels, width * height * 4 bytes. */
+  pixels: Buffer;
   width: number;
   height: number;
+  /** Helper-side stage durations (ms) plus the end-to-end request time. */
+  timings: { blt: number; dib: number; send: number; total: number };
+}
+
+function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("capture transfer timed out")), milliseconds);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 export interface WindowInfo {
@@ -130,10 +153,10 @@ export class MouseHelper extends EventEmitter {
   }
 
   /**
-   * Capture a physical-pixel rectangle of the virtual screen with GDI BitBlt
-   * and return the path to the uncompressed 32-bit BMP the helper wrote under
-   * the OS temp directory. Coordinates must be physical pixels, i.e. the result
-   * of screen.dipToScreenRect for the target display.
+   * Capture a physical-pixel rectangle of the virtual screen with GDI BitBlt.
+   * The helper streams raw top-down RGBA pixels over a per-capture named pipe,
+   * so nothing is written to disk. Coordinates must be physical pixels, i.e.
+   * the result of screen.dipToScreenRect for the target display.
    */
   async captureScreen(
     x: number,
@@ -141,17 +164,65 @@ export class MouseHelper extends EventEmitter {
     width: number,
     height: number,
   ): Promise<CaptureResult | null> {
-    const response = await this.request(
-      "capture",
-      [String(Math.round(x)), String(Math.round(y)), String(Math.round(width)), String(Math.round(height))],
-      5_000,
-    );
-    if (!response.ok || typeof response.path !== "string") return null;
-    return {
-      path: response.path,
-      width: typeof response.width === "number" ? response.width : width,
-      height: typeof response.height === "number" ? response.height : height,
-    };
+    const w = Math.round(width);
+    const h = Math.round(height);
+    if (w <= 0 || h <= 0) return null;
+    const expected = w * h * 4;
+    const pipeName = `dockwisp-shot-${process.pid}-${randomBytes(8).toString("hex")}`;
+    const started = performance.now();
+
+    let receivedAt = 0;
+    const server = createServer();
+    const pixels = new Promise<Buffer>((resolve, reject) => {
+      server.once("connection", (socket) => {
+        const target = Buffer.allocUnsafe(expected);
+        let offset = 0;
+        socket.on("data", (chunk: Buffer) => {
+          const room = expected - offset;
+          if (room > 0) chunk.copy(target, offset, 0, Math.min(room, chunk.length));
+          offset += chunk.length;
+        });
+        socket.once("end", () => {
+          receivedAt = performance.now();
+          if (offset === expected) resolve(target);
+          else reject(new Error(`capture size mismatch (${offset}/${expected})`));
+        });
+        socket.once("error", reject);
+      });
+      server.once("error", reject);
+    });
+    // Avoid an unhandled rejection when the request itself fails first.
+    pixels.catch(() => undefined);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(`\\\\.\\pipe\\${pipeName}`, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      const response = await this.request(
+        "capture",
+        [String(Math.round(x)), String(Math.round(y)), String(w), String(h), pipeName],
+        5_000,
+      );
+      if (!response.ok) return null;
+      const data = await withTimeout(pixels, 2_000);
+      return {
+        pixels: data,
+        width: w,
+        height: h,
+        timings: {
+          blt: response.bltMs ?? 0,
+          dib: response.dibMs ?? 0,
+          send: response.sendMs ?? 0,
+          total: Math.round((receivedAt || performance.now()) - started),
+        },
+      };
+    } finally {
+      server.close();
+    }
   }
 
   waitUntilReady(timeoutMs = 2_000): Promise<boolean> {

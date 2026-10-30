@@ -3,9 +3,9 @@
 #include <dwmapi.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cwctype>
-#include <fstream>
 #include <iostream>
 #include <iterator>
 #include <mutex>
@@ -292,32 +292,68 @@ bool send_media_key(WORD virtual_key) {
   return SendInput(2, inputs, sizeof(INPUT)) == 2;
 }
 
-std::atomic<uint32_t> capture_counter{0};
+struct CaptureStats {
+  long long blt_ms = 0;
+  long long dib_ms = 0;
+  long long send_ms = 0;
+};
 
-// Build a unique temp-file path for a screenshot. Returns the wide path, and
-// sets `utf8` to its UTF-8 form for the JSON response.
-std::wstring make_capture_path(std::string& utf8) {
-  wchar_t temp_dir[MAX_PATH]{};
-  const DWORD length = GetTempPathW(MAX_PATH, temp_dir);
-  std::wstring directory = (length > 0 && length < MAX_PATH) ? std::wstring(temp_dir, length)
-                                                             : std::wstring(L".\\");
-  wchar_t name[128]{};
-  swprintf(name, static_cast<int>(std::size(name)), L"dockwisp-shot-%lu-%llu-%u.bmp",
-           GetCurrentProcessId(), static_cast<unsigned long long>(GetTickCount64()),
-           capture_counter.fetch_add(1));
-  std::wstring full = directory + name;
-  utf8 = to_utf8(full);
-  return full;
+long long elapsed_ms(std::chrono::steady_clock::time_point since) {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                               since)
+      .count();
+}
+
+// Pipe names come from the parent process; only accept a plain token so the
+// helper never opens an arbitrary path.
+bool valid_pipe_name(const std::string& name) {
+  if (name.empty() || name.size() > 128) return false;
+  for (const char character : name) {
+    const bool allowed = (character >= 'a' && character <= 'z') ||
+                         (character >= 'A' && character <= 'Z') ||
+                         (character >= '0' && character <= '9') || character == '-' ||
+                         character == '_';
+    if (!allowed) return false;
+  }
+  return true;
+}
+
+HANDLE open_pipe(const std::wstring& path) {
+  for (int attempt = 0; attempt < 20; ++attempt) {
+    HANDLE pipe = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (pipe != INVALID_HANDLE_VALUE) return pipe;
+    if (GetLastError() != ERROR_PIPE_BUSY) return INVALID_HANDLE_VALUE;
+    WaitNamedPipeW(path.c_str(), 100);
+  }
+  return INVALID_HANDLE_VALUE;
+}
+
+bool write_all(HANDLE pipe, const uint8_t* data, size_t size) {
+  constexpr size_t kChunk = 4u << 20;
+  while (size > 0) {
+    const DWORD chunk = static_cast<DWORD>(size < kChunk ? size : kChunk);
+    DWORD written = 0;
+    if (!WriteFile(pipe, data, chunk, &written, nullptr) || written == 0) return false;
+    data += written;
+    size -= written;
+  }
+  return true;
 }
 
 // Capture a rectangle of the virtual screen (physical pixels) with BitBlt and
-// write it as an uncompressed 32-bit BMP. `x`/`y` are in the same physical
-// coordinate space Electron's screen.dipToScreenRect produces. Returns true on
-// success and fills `out_path` (UTF-8). CAPTURECLT includes layered windows.
-bool capture_screen_rect(long x, long y, long width, long height, std::string& out_path,
-                         std::string& error) {
+// stream it as raw top-down RGBA (width*height*4 bytes) into the named pipe
+// `\\.\pipe\<pipe_name>` the parent is listening on. Nothing touches the disk,
+// so antivirus scans and disk stalls cannot delay the screenshot. `x`/`y` are
+// in the physical coordinate space of Electron's screen.dipToScreenRect.
+// CAPTUREBLT includes layered windows.
+bool capture_screen_to_pipe(long x, long y, long width, long height, const std::string& pipe_name,
+                            CaptureStats& stats, std::string& error) {
   if (width <= 0 || height <= 0) {
     error = "invalid-capture-size";
+    return false;
+  }
+  if (!valid_pipe_name(pipe_name)) {
+    error = "invalid-pipe-name";
     return false;
   }
   HDC screen_dc = GetDC(nullptr);
@@ -325,51 +361,37 @@ bool capture_screen_rect(long x, long y, long width, long height, std::string& o
     error = "no-screen-dc";
     return false;
   }
+  auto started = std::chrono::steady_clock::now();
   HDC memory_dc = CreateCompatibleDC(screen_dc);
   HBITMAP bitmap = memory_dc ? CreateCompatibleBitmap(screen_dc, width, height) : nullptr;
   bool ok = false;
+  std::vector<uint8_t> pixels;
   if (memory_dc && bitmap) {
     HGDIOBJ previous = SelectObject(memory_dc, bitmap);
     if (BitBlt(memory_dc, 0, 0, width, height, screen_dc, x, y, SRCCOPY | CAPTUREBLT)) {
+      stats.blt_ms = elapsed_ms(started);
+      started = std::chrono::steady_clock::now();
       BITMAPINFO info{};
       info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
       info.bmiHeader.biWidth = width;
-      // Positive height => bottom-up BMP, the conventional layout decoders expect.
-      info.bmiHeader.biHeight = height;
+      // Negative height => top-down rows, matching canvas ImageData.
+      info.bmiHeader.biHeight = -height;
       info.bmiHeader.biPlanes = 1;
       info.bmiHeader.biBitCount = 32;
       info.bmiHeader.biCompression = BI_RGB;
-      const size_t row_bytes = static_cast<size_t>(width) * 4;
-      const size_t pixel_bytes = row_bytes * static_cast<size_t>(height);
-      std::vector<uint8_t> pixels(pixel_bytes);
+      const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
+      pixels.resize(pixel_count * 4);
       if (GetDIBits(memory_dc, bitmap, 0, static_cast<UINT>(height), pixels.data(), &info,
                     DIB_RGB_COLORS)) {
-        // GDI leaves the 4th byte (alpha) at 0; force opaque so decoders that
-        // honour the alpha channel do not render a fully transparent image.
-        for (size_t i = 3; i < pixel_bytes; i += 4) pixels[i] = 0xFF;
-
-        BITMAPFILEHEADER file_header{};
-        file_header.bfType = 0x4D42;  // "BM"
-        file_header.bfOffBits =
-            sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-        file_header.bfSize =
-            file_header.bfOffBits + static_cast<DWORD>(pixel_bytes);
-
-        BITMAPINFOHEADER out_header = info.bmiHeader;
-        out_header.biSizeImage = static_cast<DWORD>(pixel_bytes);
-
-        std::wstring path = make_capture_path(out_path);
-        std::ofstream file(path.c_str(), std::ios::binary | std::ios::trunc);
-        if (file) {
-          file.write(reinterpret_cast<const char*>(&file_header), sizeof(file_header));
-          file.write(reinterpret_cast<const char*>(&out_header), sizeof(out_header));
-          file.write(reinterpret_cast<const char*>(pixels.data()),
-                     static_cast<std::streamsize>(pixel_bytes));
-          ok = file.good();
-          if (!ok) error = "write-failed";
-        } else {
-          error = "open-failed";
+        // GDI yields BGRX with alpha 0; convert to opaque RGBA for ImageData.
+        auto* words = reinterpret_cast<uint32_t*>(pixels.data());
+        for (size_t i = 0; i < pixel_count; ++i) {
+          const uint32_t value = words[i];
+          words[i] = 0xFF000000u | ((value & 0x000000FFu) << 16) | (value & 0x0000FF00u) |
+                     ((value & 0x00FF0000u) >> 16);
         }
+        stats.dib_ms = elapsed_ms(started);
+        ok = true;
       } else {
         error = "getdibits-failed";
       }
@@ -383,6 +405,20 @@ bool capture_screen_rect(long x, long y, long width, long height, std::string& o
   if (bitmap) DeleteObject(bitmap);
   if (memory_dc) DeleteDC(memory_dc);
   ReleaseDC(nullptr, screen_dc);
+  if (!ok) return false;
+
+  started = std::chrono::steady_clock::now();
+  const std::wstring path = L"\\\\.\\pipe\\" + std::wstring(pipe_name.begin(), pipe_name.end());
+  HANDLE pipe = open_pipe(path);
+  if (pipe == INVALID_HANDLE_VALUE) {
+    error = "pipe-open-failed";
+    return false;
+  }
+  ok = write_all(pipe, pixels.data(), pixels.size());
+  FlushFileBuffers(pipe);
+  CloseHandle(pipe);
+  stats.send_ms = elapsed_ms(started);
+  if (!ok) error = "pipe-write-failed";
   return ok;
 }
 
@@ -491,13 +527,14 @@ void command_loop() {
       disable_window_transitions(window);
       respond(id, window && IsWindow(window) ? true : false);
     } else if (command == "capture") {
-      // capture <id> <x> <y> <width> <height> — physical-pixel rect.
+      // capture <id> <x> <y> <width> <height> <pipe> — physical-pixel rect.
       long y = 0;
       long width = 0;
       long height = 0;
-      input >> y >> width >> height;
+      std::string pipe_name;
+      input >> y >> width >> height >> pipe_name;
       long x = 0;
-      bool parsed = true;
+      bool parsed = !input.fail();
       try {
         x = std::stol(value);
       } catch (...) {
@@ -506,12 +543,13 @@ void command_loop() {
       if (!parsed) {
         respond(id, false, "\"error\":\"invalid-capture-args\"");
       } else {
-        std::string path;
+        CaptureStats stats;
         std::string error;
-        if (capture_screen_rect(x, y, width, height, path, error)) {
+        if (capture_screen_to_pipe(x, y, width, height, pipe_name, stats, error)) {
           std::ostringstream fields;
-          fields << "\"path\":\"" << json_escape(path) << "\",\"width\":" << width
-                 << ",\"height\":" << height;
+          fields << "\"width\":" << width << ",\"height\":" << height
+                 << ",\"bltMs\":" << stats.blt_ms << ",\"dibMs\":" << stats.dib_ms
+                 << ",\"sendMs\":" << stats.send_ms;
           respond(id, true, fields.str());
         } else {
           respond(id, false, "\"error\":\"" + json_escape(error) + "\"");
