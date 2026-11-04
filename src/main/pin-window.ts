@@ -169,18 +169,20 @@ export class PinWindowManager {
       entry.dragOrigin = { x: bounds.x, y: bounds.y };
     });
 
+    // The size is recomputed from the zoom scale on every move and never read
+    // back from the window. On a scaled display (e.g. 125%/150%) Windows rounds
+    // DIP bounds to physical pixels, so feeding getBounds() back into
+    // setBounds() grows the window by a pixel per move while dragging.
     ipcMain.on("pin:drag-move", (event, payload: unknown) => {
       const entry = this.entryFor(event);
       if (!entry || !entry.dragOrigin) return;
       const data = (payload ?? {}) as { dx?: unknown; dy?: unknown };
       const dx = typeof data.dx === "number" ? Math.round(data.dx) : 0;
       const dy = typeof data.dy === "number" ? Math.round(data.dy) : 0;
-      const bounds = entry.window.getBounds();
-      entry.window.setBounds({
+      entry.window.setContentBounds({
         x: entry.dragOrigin.x + dx,
         y: entry.dragOrigin.y + dy,
-        width: bounds.width,
-        height: bounds.height,
+        ...this.contentSize(entry),
       });
     });
 
@@ -202,8 +204,7 @@ export class PinWindowManager {
       entry.window.setContentBounds({
         x: bounds.x,
         y: bounds.y,
-        width: Math.max(1, Math.round(entry.baseWidth * applied)),
-        height: Math.max(1, Math.round(entry.baseHeight * applied)),
+        ...this.contentSize(entry),
       });
       return applied;
     });
@@ -237,6 +238,13 @@ export class PinWindowManager {
       ]);
       menu.popup({ window: entry.window });
     });
+  }
+
+  private contentSize(entry: PinEntry): { width: number; height: number } {
+    return {
+      width: Math.max(1, Math.round(entry.baseWidth * entry.scale)),
+      height: Math.max(1, Math.round(entry.baseHeight * entry.scale)),
+    };
   }
 
   private async save(entry: PinEntry): Promise<void> {

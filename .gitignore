@@ -25,6 +25,9 @@ native/ocr-models/*
 .DS_Store
 Thumbs.db
 *.tsbuildinfo
+# Local OpenCode tooling (clonedeps manifest and search config)
+.slim/
+.ignore
 
 # BEGIN oh-my-opencode-slim clonedeps
 .slim/clonedeps/repos/
