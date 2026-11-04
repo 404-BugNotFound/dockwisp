@@ -1,4 +1,4 @@
-import { BrowserWindow, clipboard, dialog, Menu, nativeImage, ipcMain } from "electron";
+import { BrowserWindow, clipboard, dialog, Menu, nativeImage, ipcMain, screen } from "electron";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -38,6 +38,8 @@ interface PinEntry {
   scale: number;
   // Window origin captured at the start of a pointer drag.
   dragOrigin: { x: number; y: number } | null;
+  // Position and zoom before 最大化, so the button can restore them.
+  restore: { x: number; y: number; scale: number } | null;
 }
 
 /**
@@ -104,7 +106,9 @@ export class PinWindowManager {
       backgroundColor: "#000000",
       alwaysOnTop: true,
       skipTaskbar: true,
-      resizable: false,
+      // Edge resizing is allowed; the aspect ratio is locked below. 最大化 is
+      // our own fit-to-screen (see pin:maximize), not the native maximize.
+      resizable: true,
       maximizable: false,
       fullscreenable: false,
       hasShadow: true,
@@ -118,6 +122,15 @@ export class PinWindowManager {
       },
     });
     window.setAlwaysOnTop(true, "screen-saver");
+    window.setAspectRatio(baseWidth / baseHeight);
+    window.setMinimumSize(
+      Math.max(16, Math.round(baseWidth * MIN_SCALE)),
+      Math.max(16, Math.round(baseHeight * MIN_SCALE)),
+    );
+    window.setMaximumSize(
+      Math.round(baseWidth * MAX_SCALE),
+      Math.round(baseHeight * MAX_SCALE),
+    );
 
     const entry: PinEntry = {
       window,
@@ -127,6 +140,7 @@ export class PinWindowManager {
       baseHeight,
       scale: initialScale,
       dragOrigin: null,
+      restore: null,
     };
     // Read the id now: webContents is unusable once the window is destroyed,
     // which is already the case when "closed" fires.
@@ -135,6 +149,16 @@ export class PinWindowManager {
 
     window.on("closed", () => {
       this.entries.delete(contentsId);
+    });
+    // "resized" fires once when the user finishes resizing by an edge (not
+    // for our own setContentBounds calls). Adopt the new size as the zoom
+    // scale so later drags and wheel zooms keep it.
+    window.on("resized", () => {
+      if (window.isDestroyed()) return;
+      const [width] = window.getContentSize();
+      entry.scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, width / entry.baseWidth));
+      entry.restore = null;
+      this.notifyState(entry, true);
     });
     window.webContents.on("will-navigate", (event) => event.preventDefault());
     window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -200,13 +224,45 @@ export class PinWindowManager {
       const requested = typeof scale === "number" && Number.isFinite(scale) ? scale : 1;
       const applied = Math.min(MAX_SCALE, Math.max(MIN_SCALE, requested));
       entry.scale = applied;
+      entry.restore = null;
       const bounds = entry.window.getBounds();
       entry.window.setContentBounds({
         x: bounds.x,
         y: bounds.y,
         ...this.contentSize(entry),
       });
+      this.notifyState(entry, false);
       return applied;
+    });
+
+    // 最大化: fit the whole image into the work area of the display the pin is
+    // on, centred, keeping its aspect ratio. Pressing again restores the
+    // previous position and zoom.
+    ipcMain.on("pin:maximize", (event) => {
+      const entry = this.entryFor(event);
+      if (!entry) return;
+      const window = entry.window;
+      if (entry.restore) {
+        const previous = entry.restore;
+        entry.restore = null;
+        entry.scale = previous.scale;
+        window.setContentBounds({ x: previous.x, y: previous.y, ...this.contentSize(entry) });
+      } else {
+        const bounds = window.getBounds();
+        entry.restore = { x: bounds.x, y: bounds.y, scale: entry.scale };
+        const area = screen.getDisplayMatching(bounds).workArea;
+        entry.scale = Math.min(
+          MAX_SCALE,
+          Math.max(MIN_SCALE, Math.min(area.width / entry.baseWidth, area.height / entry.baseHeight)),
+        );
+        const size = this.contentSize(entry);
+        window.setContentBounds({
+          x: Math.round(area.x + (area.width - size.width) / 2),
+          y: Math.round(area.y + (area.height - size.height) / 2),
+          ...size,
+        });
+      }
+      this.notifyState(entry, true);
     });
 
     ipcMain.on("pin:close", (event) => {
@@ -245,6 +301,16 @@ export class PinWindowManager {
       width: Math.max(1, Math.round(entry.baseWidth * entry.scale)),
       height: Math.max(1, Math.round(entry.baseHeight * entry.scale)),
     };
+  }
+
+  /** Tell the page the current zoom and whether it is in the 最大化 state. */
+  private notifyState(entry: PinEntry, showZoom: boolean): void {
+    if (entry.window.isDestroyed()) return;
+    entry.window.webContents.send("pin:state", {
+      scale: entry.scale,
+      maximized: entry.restore !== null,
+      showZoom,
+    });
   }
 
   private async save(entry: PinEntry): Promise<void> {

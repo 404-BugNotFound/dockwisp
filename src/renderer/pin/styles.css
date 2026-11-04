@@ -88,6 +88,10 @@ body:hover #controls {
   display: block;
 }
 
+#controls button svg[hidden] {
+  display: none;
+}
+
 #controls button:hover {
   background: rgba(255, 255, 255, 0.16);
 }

@@ -4,6 +4,9 @@ const image = document.getElementById("pinned");
 const zoomTag = document.getElementById("zoom");
 const controls = document.getElementById("controls");
 const btnMin = document.getElementById("btn-min");
+const btnMax = document.getElementById("btn-max");
+const iconMax = document.getElementById("icon-max");
+const iconRestore = document.getElementById("icon-restore");
 const btnClose = document.getElementById("btn-close");
 
 let scale = 1;
@@ -85,4 +88,16 @@ controls.addEventListener("pointerdown", (event) => event.stopPropagation());
 controls.addEventListener("dblclick", (event) => event.stopPropagation());
 
 btnMin.addEventListener("click", () => window.pin.minimize());
+btnMax.addEventListener("click", () => window.pin.maximize());
 btnClose.addEventListener("click", () => window.pin.close());
+
+// Main reports zoom changes it makes itself (最大化 / 还原, edge resizing) so
+// the wheel keeps zooming from the real size and the button shows the state.
+window.pin.onState((state) => {
+  if (typeof state.scale === "number" && state.scale > 0) scale = state.scale;
+  const maximized = !!state.maximized;
+  iconMax.hidden = maximized;
+  iconRestore.hidden = !maximized;
+  btnMax.title = maximized ? "还原" : "最大化";
+  if (state.showZoom) showZoom(scale);
+});
