@@ -9,6 +9,8 @@ interface OcrWorkerRecognizeRequest {
   type: "recognize";
   id: number;
   imagePath: string;
+  // When true the response also carries per-line boxes in image coordinates.
+  layout?: boolean;
 }
 
 interface OcrWorkerWarmupRequest {
@@ -19,11 +21,18 @@ interface OcrWorkerWarmupRequest {
 
 type OcrWorkerRequest = OcrWorkerRecognizeRequest | OcrWorkerWarmupRequest;
 
+interface OcrWorkerLine {
+  text: string;
+  box: { x: number; y: number; width: number; height: number };
+}
+
 interface OcrWorkerResponse {
   type: "result";
   id: number;
   ok: boolean;
   text?: string;
+  // Present only when the request asked for layout.
+  lines?: OcrWorkerLine[];
   error?: string;
 }
 
@@ -95,6 +104,15 @@ async function recognize(request: OcrWorkerRecognizeRequest): Promise<void> {
       ok: true,
       text: result.text,
     };
+    if (request.layout) {
+      // Each grouped line is a list of left-to-right items; merge them into one
+      // line box (union) with the item texts space-joined. "lines" exists on the
+      // grouped PaddleOcrResult shape returned when flatten is not requested.
+      const grouped = (result as { lines?: Array<Array<{ text: string; box: { x: number; y: number; width: number; height: number } }>> }).lines ?? [];
+      response.lines = grouped
+        .map((items) => mergeLine(items))
+        .filter((line): line is OcrWorkerLine => line !== null);
+    }
     parentPort.postMessage(response);
   } catch (error) {
     const response: OcrWorkerResponse = {
@@ -105,6 +123,29 @@ async function recognize(request: OcrWorkerRecognizeRequest): Promise<void> {
     };
     parentPort.postMessage(response);
   }
+}
+
+/** Merge one detected line's items into a single box (union) and joined text. */
+function mergeLine(
+  items: Array<{ text: string; box: { x: number; y: number; width: number; height: number } }>,
+): OcrWorkerLine | null {
+  if (items.length === 0) return null;
+  let left = Infinity;
+  let top = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  for (const item of items) {
+    left = Math.min(left, item.box.x);
+    top = Math.min(top, item.box.y);
+    right = Math.max(right, item.box.x + item.box.width);
+    bottom = Math.max(bottom, item.box.y + item.box.height);
+  }
+  if (!Number.isFinite(left) || !Number.isFinite(top)) return null;
+  const text = items.map((item) => item.text).join(" ");
+  return {
+    text,
+    box: { x: left, y: top, width: right - left, height: bottom - top },
+  };
 }
 
 parentPort.on("message", (event) => {

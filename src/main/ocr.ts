@@ -26,6 +26,7 @@ interface OcrWorkerRecognizeRequest {
   type: "recognize";
   id: number;
   imagePath: string;
+  layout?: boolean;
 }
 
 interface OcrWorkerWarmupRequest {
@@ -35,18 +36,30 @@ interface OcrWorkerWarmupRequest {
 
 type OcrWorkerRequest = OcrWorkerRecognizeRequest | OcrWorkerWarmupRequest;
 
+export interface OcrLine {
+  text: string;
+  box: { x: number; y: number; width: number; height: number };
+}
+
+export interface OcrLayoutResult {
+  text: string;
+  lines: OcrLine[];
+}
+
 interface OcrWorkerResponse {
   type: "result";
   id: number;
   ok: boolean;
   text?: string;
+  lines?: OcrLine[];
   error?: string;
 }
 
 interface PendingOcrRequest {
-  resolve: (text: string) => void;
+  resolve: (result: OcrLayoutResult) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+  layout: boolean;
 }
 
 /**
@@ -116,19 +129,33 @@ class PaddleOcrClient {
   private lifecycleRegistered = false;
 
   async recognize(imagePath: string): Promise<string> {
+    const result = await this.run(imagePath, false);
+    return result.text;
+  }
+
+  async recognizeLayout(imagePath: string): Promise<OcrLayoutResult> {
+    return this.run(imagePath, true);
+  }
+
+  private async run(imagePath: string, layout: boolean): Promise<OcrLayoutResult> {
     if (!existsSync(imagePath)) throw new Error(`OCR 图片不存在：${imagePath}`);
     this.cancelRecycle();
     const worker = await this.ensureWorker();
     this.primed = true;
     const id = this.nextId++;
-    return new Promise<string>((resolve, reject) => {
+    return new Promise<OcrLayoutResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error("文字识别超时"));
       }, OCR_TIMEOUT_MS);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, layout });
       try {
-        const request: OcrWorkerRecognizeRequest = { type: "recognize", id, imagePath };
+        const request: OcrWorkerRecognizeRequest = {
+          type: "recognize",
+          id,
+          imagePath,
+          ...(layout ? { layout: true } : {}),
+        };
         worker.postMessage(request);
       } catch (error) {
         clearTimeout(timer);
@@ -244,8 +271,20 @@ class PaddleOcrClient {
     if (!pending) return;
     clearTimeout(pending.timer);
     this.pending.delete(response.id);
-    if (response.ok) pending.resolve(normalizeOcrText(response.text ?? ""));
-    else pending.reject(new Error(response.error || "文字识别失败"));
+    if (response.ok) {
+      const text = normalizeOcrText(response.text ?? "");
+      const lines = pending.layout
+        ? (response.lines ?? []).map((line) => ({
+            // Each line is one row; normalizeOcrText applies the CJK spacing
+            // cleanup on it as a single line.
+            text: normalizeOcrText(line.text),
+            box: line.box,
+          }))
+        : [];
+      pending.resolve({ text, lines });
+    } else {
+      pending.reject(new Error(response.error || "文字识别失败"));
+    }
     if (this.pending.size === 0) this.scheduleRecycle();
   }
 
@@ -281,6 +320,14 @@ const paddleOcr = new PaddleOcrClient();
 /** Recognize one local image using the bundled offline PP-OCRv5 models. */
 export function recognizeImageFile(imagePath: string): Promise<string> {
   return paddleOcr.recognize(imagePath);
+}
+
+/**
+ * Recognize one local image and return both the full text and per-line boxes
+ * in the image's own pixel coordinates. Used by the layout OCR overlay.
+ */
+export function recognizeImageLayout(imagePath: string): Promise<OcrLayoutResult> {
+  return paddleOcr.recognizeLayout(imagePath);
 }
 
 /**

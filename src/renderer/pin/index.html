@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>钉图</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <img id="pinned" alt="" draggable="false" />
+    <div id="zoom" hidden></div>
+    <div id="controls">
+      <button id="btn-min" type="button" title="最小化">
+        <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+          <line
+            x1="2"
+            y1="6"
+            x2="10"
+            y2="6"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
+        </svg>
+      </button>
+      <button id="btn-close" type="button" title="关闭 (Esc)">
+        <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+          <line
+            x1="2.6"
+            y1="2.6"
+            x2="9.4"
+            y2="9.4"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
+          <line
+            x1="9.4"
+            y1="2.6"
+            x2="2.6"
+            y2="9.4"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
+        </svg>
+      </button>
+    </div>
+  </body>
+</html>

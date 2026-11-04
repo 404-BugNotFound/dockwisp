@@ -13,8 +13,10 @@
   </head>
   <body>
     <div id="root" data-mode="idle" data-entering="true">
-      <!-- 清晰的全屏截图 -->
+      <!-- 清晰的全屏截图 / 长图底图 -->
       <canvas id="shot"></canvas>
+      <!-- 译文层：原图之上、标注之下 -->
+      <canvas id="trans" hidden></canvas>
       <!-- 标注层：backing store 为图片原始尺寸 -->
       <canvas id="anno"></canvas>
       <!-- 无选区时的整屏暗化 -->
@@ -37,14 +39,46 @@
         <i class="handle" data-handle="w"></i>
       </div>
 
+      <!-- 提取文字的高亮框容器（覆盖 UI，不计入导出） -->
+      <div id="ocrBoxes"></div>
+
+      <!-- 翻译加载态（覆盖选区中央） -->
+      <div id="transLoading" hidden>
+        <span class="spinner"></span><span>翻译中…</span>
+      </div>
+
+      <!-- 原文 / 译文 切换胶囊 -->
+      <div id="transToggle" hidden>
+        <span id="transLabel"></span>
+        <div class="seg">
+          <button type="button" data-trans="src">原文</button>
+          <button type="button" data-trans="dst" aria-pressed="true">译文</button>
+        </div>
+      </div>
+
+      <!-- 文字标注输入框 -->
+      <textarea id="textEditor" spellcheck="false" hidden></textarea>
+      <div id="brushCursor" hidden></div>
+
       <!-- 底部极简提示 -->
       <div id="hint">拖动选择区域 · Enter 全屏复制 · Esc 取消</div>
 
-      <!-- 工具栏 -->
+      <!-- 主工具栏 -->
       <div id="toolbar" hidden>
         <div class="tb-group" id="tools">
           <button class="tb-btn" data-tool="rect" type="button" title="矩形 (R)" aria-label="矩形">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="1.5" /></svg>
+          </button>
+          <button class="tb-btn" data-tool="ellipse" type="button" title="椭圆 (E)" aria-label="椭圆">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="12" rx="8.5" ry="6.5" /></svg>
+          </button>
+          <button class="tb-btn" data-tool="emoji" type="button" title="表情" aria-label="表情">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <circle cx="9" cy="10" r="1" fill="currentColor" stroke="none" />
+              <circle cx="15" cy="10" r="1" fill="currentColor" stroke="none" />
+              <path d="M8.2 14 C9.6 16 14.4 16 15.8 14" />
+            </svg>
           </button>
           <button class="tb-btn" data-tool="arrow" type="button" title="箭头 (A)" aria-label="箭头">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 L19 5 M19 5 L19 12 M19 5 L12 5" /></svg>
@@ -55,40 +89,56 @@
           <button class="tb-btn" data-tool="mosaic" type="button" title="马赛克 (M)" aria-label="马赛克">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h5v5H4z M14 4h6v5h-6z M9 9h5v5H9z M4 14h5v6H4z M14 14h6v6h-6z" fill="currentColor" stroke="none"/></svg>
           </button>
+          <button class="tb-btn" data-tool="text" type="button" title="文字 (T)" aria-label="文字">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6 H19 M12 6 V18 M9 18 H15" /></svg>
+          </button>
         </div>
-
-        <span class="tb-sep"></span>
-
-        <div class="tb-group" id="colors">
-          <button class="dot" data-color="#ff4d4f" type="button" aria-label="红色"></button>
-          <button class="dot" data-color="#ffd93b" type="button" aria-label="黄色"></button>
-          <button class="dot" data-color="#4d9bff" type="button" aria-label="蓝色"></button>
-          <button class="dot" data-color="#ffffff" type="button" aria-label="白色"></button>
-        </div>
-
-        <span class="tb-sep"></span>
-
-        <button class="tb-btn" id="undo" type="button" title="撤销 (Ctrl+Z)" aria-label="撤销">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 L4 11 L9 15 M4 11 H14.5 A5 5 0 0 1 14.5 21 H10" /></svg>
-        </button>
 
         <span class="tb-sep"></span>
 
         <div class="tb-group">
-          <button class="tb-text" id="ocr" type="button">识别</button>
-          <button class="tb-text" id="translate" type="button">翻译</button>
-          <button class="tb-text" id="save" type="button">保存</button>
-          <button class="tb-btn danger" id="close" type="button" title="关闭 (Esc)" aria-label="关闭">
+          <button class="tb-btn" id="translate" type="button" title="翻译" aria-label="翻译">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7 H11 M7.5 7 V5 M9.5 7 C9.5 11 7 14 4 15.5 M6 11.5 C7.5 13.5 9.5 14.8 12 15.5 M13 19 L16.5 10 L20 19 M14.2 16.2 H18.8" /></svg>
+          </button>
+          <button class="tb-btn" id="ocr" type="button" title="提取文字" aria-label="提取文字">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8 V6 A2 2 0 0 1 6 4 H8 M20 8 V6 A2 2 0 0 0 18 4 H16 M4 16 V18 A2 2 0 0 0 6 20 H8 M20 16 V18 A2 2 0 0 1 18 20 H16 M8 9 H16 M8 12 H16 M8 15 H13" /></svg>
+          </button>
+          <button class="tb-btn" id="long" type="button" title="长截图" aria-label="长截图">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="3" width="10" height="13" rx="1.5" /><path d="M10 7 H14 M10 10 H14 M12 17 V22 M9.5 19.5 L12 22 L14.5 19.5" /></svg>
+          </button>
+        </div>
+
+        <span class="tb-sep"></span>
+
+        <div class="tb-group">
+          <button class="tb-btn" id="undo" type="button" title="撤销 (Ctrl+Z)" aria-label="撤销">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 L4 11 L9 15 M4 11 H14.5 A5 5 0 0 1 14.5 21 H10" /></svg>
+          </button>
+          <button class="tb-btn" id="save" type="button" title="保存 (Ctrl+S)" aria-label="保存">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4 V14 M8 11 L12 15 L16 11 M5 19 H19" /></svg>
+          </button>
+          <button class="tb-btn" id="pin" type="button" title="钉图" aria-label="钉图">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 3 H16 L14.8 9 L18 12.5 H6 L9.2 9 L8 3 Z M12 12.5 V21" /></svg>
+          </button>
+          <button class="tb-btn danger" id="close" type="button" title="取消 (Esc)" aria-label="取消">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6 L18 18 M18 6 L6 18" /></svg>
           </button>
-          <button class="tb-text" id="copy" type="button" title="复制并关闭 (Enter)">复制</button>
+          <button class="tb-btn done" id="done" type="button" title="完成 (Enter)" aria-label="完成">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5 L10 17.5 L19 6.5" /></svg>
+          </button>
         </div>
       </div>
 
-      <!-- 结果面板 -->
+      <!-- 二级栏（选中画图工具时弹出） -->
+      <div id="subbar" hidden>
+        <i id="subArrow"></i>
+        <div id="subContent"></div>
+      </div>
+
+      <!-- 结果面板（提取文字） -->
       <aside id="panel" hidden>
         <div class="panel-head">
-          <span id="panelTitle">文字识别</span>
+          <span id="panelTitle">提取文字</span>
           <button class="panel-close" id="panelClose" type="button" aria-label="关闭面板">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6 L18 18 M18 6 L6 18" /></svg>
           </button>

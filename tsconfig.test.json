@@ -10,6 +10,7 @@
     "src/translation/**/*.ts",
     "src/main/plugin-store.ts",
     "src/main/plugin-package.ts",
+    "src/main/long-stitch.ts",
     "src/main/settings.ts",
     "src/main/usage-store.ts",
     "src/main/start-apps.ts",

@@ -1,16 +1,17 @@
 :root {
   color-scheme: dark;
   font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-  --tb-bg: rgba(24, 25, 30, 0.92);
-  --tb-bg-solid: rgba(24, 25, 30, 0.96);
-  --line: rgba(255, 255, 255, 0.12);
-  --line-soft: rgba(255, 255, 255, 0.08);
-  --hover: rgba(255, 255, 255, 0.08);
-  --active: rgba(255, 255, 255, 0.14);
+  --wx-green: #07c160;
+  --wx-green-soft: rgba(7, 193, 96, 0.12);
+  --tb-bg: #ffffff;
+  --tb-line: #e6e6e8;
+  --tb-hover: #f2f3f5;
+  --icon: #4b4e54;
+  --icon-muted: #9a9ca3;
   --text: #f4f4f7;
   --muted: #9a9ba6;
-  --radius: 13px;
-  --sel-line: rgba(255, 255, 255, 0.95);
+  --radius: 10px;
+  --sel-line: var(--wx-green);
 }
 
 /* hidden 必须压过各元素的 display:flex/grid 等 */
@@ -47,23 +48,37 @@ body {
 #root[data-mode="drawing"] {
   cursor: crosshair;
 }
+/* 长图编辑模式：不再框选，正常指针 */
+#root[data-long="true"][data-mode="idle"] {
+  cursor: default;
+}
 
-#shot {
+#shot,
+#trans,
+#anno {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: fill;
+  left: 0;
+  top: 0;
   pointer-events: none;
   -webkit-user-drag: none;
 }
-
-#anno {
-  position: absolute;
-  inset: 0;
+/* 普通模式：三层铺满视口；长图模式用 JS 写 left/top/width/height */
+#root[data-long="false"] #shot,
+#root[data-long="false"] #trans,
+#root[data-long="false"] #anno {
   width: 100%;
   height: 100%;
-  pointer-events: none;
+}
+#shot {
+  object-fit: fill;
+}
+#trans[hidden] {
+  display: none;
+}
+
+/* 长图模式整屏深色背景 */
+#root[data-long="true"] {
+  background: #141518;
 }
 
 /* 启动动画：遮罩与提示从透明淡入（截图本身保持不动） */
@@ -90,7 +105,7 @@ body {
   display: none;
 }
 
-/* 选区：外部暗化由 4 块遮罩完成（比超大 box-shadow 每帧整屏重绘便宜得多） */
+/* 选区：外部暗化由 4 块遮罩完成 */
 #selection {
   position: absolute;
   left: 0;
@@ -102,6 +117,11 @@ body {
 #selection[hidden] {
   display: none;
 }
+/* 长图模式选区固定，无边框、不可交互 */
+#root[data-long="true"] #selection {
+  border: 0;
+  cursor: default;
+}
 .mask {
   position: absolute;
   left: 0;
@@ -110,6 +130,10 @@ body {
   pointer-events: none;
 }
 #root[data-has-selection="false"] .mask {
+  display: none;
+}
+#root[data-long="true"] .mask,
+#root[data-long="true"] #dim {
   display: none;
 }
 
@@ -124,15 +148,16 @@ body {
   letter-spacing: 0.2px;
   color: #fff;
   background: rgba(16, 17, 21, 0.9);
-  border: 1px solid var(--line-soft);
   border-radius: 6px;
   white-space: nowrap;
   pointer-events: none;
 }
-/* 顶部空间不足时，标签落到选区内部顶端 */
 #selection[data-tag="inside"] .size-tag {
   transform: translateY(6px);
   left: 6px;
+}
+#root[data-long="true"] .size-tag {
+  display: none;
 }
 
 .handle {
@@ -140,8 +165,8 @@ body {
   width: 9px;
   height: 9px;
   background: #fff;
-  border: 1px solid rgba(0, 0, 0, 0.35);
-  border-radius: 2px;
+  border: 1px solid var(--wx-green);
+  border-radius: 50%;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 .handle[data-handle="nw"] { top: -5px; left: -5px; cursor: nwse-resize; }
@@ -157,7 +182,26 @@ body {
 #root[data-tool-active="true"] #selection {
   cursor: crosshair;
 }
-#root[data-tool-active="true"] .handle {
+/* 马赛克：用跟随鼠标的圆圈表示笔刷大小 */
+#root[data-brush="true"],
+#root[data-brush="true"] #selection {
+  cursor: none;
+}
+#brushCursor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border-radius: 50%;
+  border: 1.5px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  z-index: 30;
+}
+#brushCursor[hidden] {
+  display: none;
+}
+#root[data-tool-active="true"] .handle,
+#root[data-long="true"] .handle {
   opacity: 0;
   pointer-events: none;
 }
@@ -170,29 +214,28 @@ body {
   padding: 8px 16px;
   font-size: 12.5px;
   letter-spacing: 0.3px;
-  color: var(--text);
-  background: var(--tb-bg);
-  border: 1px solid var(--line);
+  color: #fff;
+  background: rgba(24, 25, 30, 0.82);
   border-radius: 999px;
   box-shadow: 0 8px 26px rgba(0, 0, 0, 0.4);
   pointer-events: none;
 }
-#root[data-has-selection="true"] #hint {
+#root[data-has-selection="true"] #hint,
+#root[data-long="true"] #hint {
   display: none;
 }
 
-/* 工具栏 */
+/* ---------------- 主工具栏（微信风白条） ---------------- */
 #toolbar {
   position: absolute;
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 5px 7px;
+  gap: 2px;
+  height: 40px;
+  padding: 0 8px;
   background: var(--tb-bg);
-  border: 1px solid var(--line);
   border-radius: var(--radius);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.3);
-  backdrop-filter: blur(18px) saturate(120%);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18), 0 1px 4px rgba(0, 0, 0, 0.1);
   z-index: 20;
 }
 #toolbar[hidden] {
@@ -208,94 +251,324 @@ body {
 .tb-sep {
   width: 1px;
   height: 20px;
-  margin: 0 4px;
-  background: var(--line);
+  margin: 0 5px;
+  background: var(--tb-line);
 }
 
 .tb-btn {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: 7px;
   background: transparent;
-  color: var(--text);
+  color: var(--icon);
   cursor: pointer;
   transition: background 0.12s ease, color 0.12s ease;
 }
 .tb-btn:hover {
-  background: var(--hover);
+  background: var(--tb-hover);
 }
 .tb-btn:disabled {
-  opacity: 0.35;
+  opacity: 0.32;
   background: transparent;
   cursor: default;
 }
 .tb-btn svg {
-  width: 17px;
-  height: 17px;
+  width: 20px;
+  height: 20px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.8;
+  stroke-width: 1.7;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+/* 选中态：绿色图标 + 浅绿底 */
 .tb-btn[aria-pressed="true"] {
-  background: var(--active);
-  color: #fff;
+  background: var(--wx-green-soft);
+  color: var(--wx-green);
+}
+/* 取消（红 ×） */
+.tb-btn.danger {
+  color: #e54d4d;
 }
 .tb-btn.danger:hover {
-  background: rgba(216, 75, 85, 0.22);
-  color: #ff9ca2;
+  background: rgba(229, 77, 77, 0.12);
+}
+/* 完成（绿 ✓） */
+.tb-btn.done {
+  color: var(--wx-green);
+}
+.tb-btn.done:hover {
+  background: var(--wx-green-soft);
+}
+.tb-btn.busy {
+  color: var(--wx-green);
+}
+.tb-btn.busy svg {
+  animation: pulse 0.9s ease-in-out infinite;
+}
+@keyframes pulse {
+  50% { opacity: 0.35; }
 }
 
-.tb-text {
-  height: 30px;
-  padding: 0 11px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-  transition: background 0.12s ease, opacity 0.12s ease;
+/* ---------------- 二级栏 ---------------- */
+#subbar {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  height: 38px;
+  padding: 0 10px;
+  background: var(--tb-bg);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16), 0 1px 3px rgba(0, 0, 0, 0.1);
+  z-index: 19;
 }
-.tb-text:hover {
-  background: var(--hover);
+#subbar[hidden] {
+  display: none;
 }
-.tb-text:disabled {
-  opacity: 0.45;
-  cursor: default;
-  background: transparent;
+#subArrow {
+  position: absolute;
+  top: -6px;
+  width: 12px;
+  height: 12px;
+  background: var(--tb-bg);
+  transform: rotate(45deg);
+  box-shadow: -2px -2px 4px rgba(0, 0, 0, 0.04);
 }
-.tb-text.busy {
-  color: var(--muted);
+#subContent {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
-
-#colors {
-  gap: 5px;
-  padding: 0 3px;
+.sub-sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: var(--tb-line);
 }
-.dot {
-  width: 16px;
-  height: 16px;
+/* 粗细圆点 */
+.sub-size {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.sub-size:hover {
+  background: var(--tb-hover);
+}
+.sub-size[aria-pressed="true"] {
+  background: var(--wx-green-soft);
+}
+.sub-size i {
+  display: block;
+  border-radius: 50%;
+  background: var(--icon);
+}
+.sub-size[aria-pressed="true"] i {
+  background: var(--wx-green);
+}
+/* 字号档：显示 A 字母，不同大小 */
+.sub-font {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--icon);
+  cursor: pointer;
+  line-height: 1;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.sub-font:hover {
+  background: var(--tb-hover);
+}
+.sub-font[aria-pressed="true"] {
+  background: var(--wx-green-soft);
+  color: var(--wx-green);
+}
+/* 颜色块 */
+.sub-color {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.14);
   border-radius: 50%;
   cursor: pointer;
   transition: transform 0.12s ease, box-shadow 0.12s ease;
 }
-.dot:hover {
-  transform: scale(1.12);
+.sub-color:hover {
+  transform: scale(1.14);
 }
-.dot[aria-pressed="true"] {
-  box-shadow: 0 0 0 2px var(--tb-bg), 0 0 0 3.5px #fff;
+.sub-color[aria-pressed="true"] {
+  box-shadow: 0 0 0 2px #fff, 0 0 0 3.5px var(--wx-green);
 }
 
-/* 结果面板 */
+/* 表情面板 */
+#subbar.emoji-panel {
+  height: auto;
+  padding: 10px;
+  max-width: 320px;
+}
+#subbar.emoji-panel #subContent {
+  display: block;
+}
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 2px;
+}
+.emoji-cell {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", sans-serif;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+.emoji-cell:hover {
+  background: var(--tb-hover);
+}
+.emoji-cell[aria-pressed="true"] {
+  background: var(--wx-green-soft);
+}
+.emoji-hint {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--tb-line);
+  font-size: 11px;
+  color: var(--icon-muted);
+  text-align: center;
+}
+.emoji-sizes {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+/* ---------------- 提取文字高亮框 ---------------- */
+#ocrBoxes {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 15;
+}
+.ocr-box {
+  position: absolute;
+  background: rgba(45, 125, 246, 0.22);
+  border: 1px solid rgba(45, 125, 246, 0.7);
+  border-radius: 2px;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: background 0.1s ease;
+}
+.ocr-box:hover {
+  background: rgba(45, 125, 246, 0.36);
+}
+
+/* ---------------- 翻译加载态 ---------------- */
+#transLoading {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 18px;
+  color: #fff;
+  font-size: 13px;
+  background: rgba(16, 17, 21, 0.78);
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  z-index: 25;
+  pointer-events: none;
+}
+#transLoading[hidden] {
+  display: none;
+}
+
+/* ---------------- 原文 / 译文 胶囊 ---------------- */
+#transToggle {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 4px 10px;
+  background: var(--tb-bg);
+  border-radius: 999px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+  z-index: 21;
+}
+#transToggle[hidden] {
+  display: none;
+}
+#transLabel {
+  font-size: 11px;
+  color: var(--icon-muted);
+  white-space: nowrap;
+}
+#transToggle .seg {
+  display: flex;
+  background: var(--tb-hover);
+  border-radius: 999px;
+  padding: 2px;
+}
+#transToggle .seg button {
+  padding: 3px 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--icon);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+#transToggle .seg button[aria-pressed="true"] {
+  background: var(--wx-green);
+  color: #fff;
+}
+
+/* ---------------- 文字标注输入框 ---------------- */
+#textEditor {
+  position: absolute;
+  margin: 0;
+  padding: 2px 4px;
+  border: 1px dashed var(--wx-green);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f5222d;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  line-height: 1.25;
+  outline: none;
+  overflow: hidden;
+  resize: none;
+  white-space: pre;
+  z-index: 26;
+  -webkit-user-select: text;
+  user-select: text;
+}
+#textEditor[hidden] {
+  display: none;
+}
+
+/* ---------------- 结果面板（微信白卡片） ---------------- */
 #panel {
   position: absolute;
   top: 24px;
@@ -305,20 +578,19 @@ body {
   max-height: calc(100vh - 48px);
   display: flex;
   flex-direction: column;
-  background: var(--tb-bg-solid);
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(20px) saturate(120%);
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.28);
   overflow: hidden;
   z-index: 30;
+  color: #1a1b1f;
 }
 #panel[hidden] {
   display: none;
 }
 #panel[data-dock="bottom"] {
   top: auto;
-  bottom: 78px; /* 保持在底部工具栏上方，工具栏仍可点 */
+  bottom: 78px;
   left: 50%;
   right: auto;
   transform: translateX(-50%);
@@ -331,12 +603,13 @@ body {
   align-items: center;
   gap: 8px;
   padding: 12px 14px;
-  border-bottom: 1px solid var(--line-soft);
+  border-bottom: 1px solid #eef0f2;
 }
 #panelTitle {
   flex: 1;
   font-size: 13px;
   font-weight: 600;
+  color: #1a1b1f;
 }
 .panel-close {
   display: grid;
@@ -347,12 +620,12 @@ body {
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: var(--muted);
+  color: var(--icon-muted);
   cursor: pointer;
 }
 .panel-close:hover {
-  background: var(--hover);
-  color: var(--text);
+  background: var(--tb-hover);
+  color: var(--icon);
 }
 .panel-close svg {
   width: 13px;
@@ -373,16 +646,20 @@ body {
   align-items: center;
   gap: 9px;
   padding: 18px 2px;
-  color: var(--muted);
+  color: var(--icon-muted);
   font-size: 12.5px;
 }
 .spinner {
   width: 15px;
   height: 15px;
-  border: 2px solid rgba(255, 255, 255, 0.18);
-  border-top-color: rgba(255, 255, 255, 0.85);
+  border: 2px solid rgba(7, 193, 96, 0.22);
+  border-top-color: var(--wx-green);
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
+}
+#transLoading .spinner {
+  border-color: rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
 }
 @keyframes spin {
   to {
@@ -394,7 +671,7 @@ body {
   display: block;
   margin: 0 0 5px;
   font-size: 11px;
-  color: var(--muted);
+  color: var(--icon-muted);
   letter-spacing: 0.3px;
 }
 #panelSourceWrap {
@@ -406,11 +683,10 @@ body {
   overflow-y: auto;
   font-size: 12px;
   line-height: 1.55;
-  color: var(--muted);
+  color: #6b6e75;
   white-space: pre-wrap;
   word-break: break-word;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--line-soft);
+  background: #f6f7f9;
   border-radius: 8px;
   -webkit-user-select: text;
   user-select: text;
@@ -424,16 +700,16 @@ body {
   font: inherit;
   font-size: 12.5px;
   line-height: 1.6;
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--line-soft);
+  color: #1a1b1f;
+  background: #f6f7f9;
+  border: 1px solid #eef0f2;
   border-radius: 8px;
   outline: none;
   -webkit-user-select: text;
   user-select: text;
 }
 #panelText:focus {
-  border-color: rgba(255, 255, 255, 0.22);
+  border-color: var(--wx-green);
 }
 
 .panel-foot {
@@ -441,31 +717,31 @@ body {
   justify-content: flex-end;
   gap: 8px;
   padding: 11px 14px;
-  border-top: 1px solid var(--line-soft);
+  border-top: 1px solid #eef0f2;
 }
 .panel-btn {
   height: 30px;
   padding: 0 14px;
-  border: 1px solid var(--line);
+  border: 1px solid #e0e2e5;
   border-radius: 8px;
-  background: transparent;
-  color: var(--text);
+  background: #fff;
+  color: #1a1b1f;
   font: inherit;
   font-size: 12.5px;
   cursor: pointer;
   transition: background 0.12s ease;
 }
 .panel-btn:hover {
-  background: var(--hover);
+  background: var(--tb-hover);
 }
 .panel-btn.primary {
   border-color: transparent;
-  background: rgba(255, 255, 255, 0.92);
-  color: #16171b;
+  background: var(--wx-green);
+  color: #fff;
   font-weight: 600;
 }
 .panel-btn.primary:hover {
-  background: #fff;
+  background: #06a854;
 }
 
 /* 极细滚动条 */
@@ -477,7 +753,7 @@ body {
 .panel-body::-webkit-scrollbar-thumb,
 .panel-source::-webkit-scrollbar-thumb,
 #panelText::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.18);
   border-radius: 3px;
 }
 .panel-body::-webkit-scrollbar-track,
@@ -496,7 +772,6 @@ body {
   font-size: 13px;
   color: #fff;
   background: rgba(24, 25, 30, 0.95);
-  border: 1px solid var(--line);
   border-radius: 999px;
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
   opacity: 0;

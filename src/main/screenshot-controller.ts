@@ -13,9 +13,12 @@ import { appendFile, mkdir, rename, stat, unlink, writeFile } from "node:fs/prom
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { translateText } from "../translation/providers";
+import { detectLanguagePair } from "../translation/language";
 import { MouseHelper } from "./mouse-helper";
-import { ocrResizeDimensions, recognizeImageFile, warmupOcr } from "./ocr";
+import { ocrResizeDimensions, recognizeImageFile, recognizeImageLayout, warmupOcr } from "./ocr";
 import { SettingsStore } from "./settings";
+import { PinWindowManager, type PinPayload } from "./pin-window";
+import { LongCaptureSession, type LongCaptureRect } from "./long-capture";
 
 interface ScreenshotState {
   // Native captures send raw top-down RGBA pixels (no encoding, no file);
@@ -140,6 +143,11 @@ export class ScreenshotController {
   private suppressBlurClose = false;
   private lastOpenAt = 0;
   private lastHotkeyAt = 0;
+  // The display captured in the most recent open(); needed to map the overlay's
+  // image-pixel coordinates back to DIP screen coordinates for pin / long shot.
+  private captureDisplayInfo: Electron.Display | null = null;
+  private readonly pins = new PinWindowManager();
+  private longSession: LongCaptureSession | null = null;
 
   constructor(
     private readonly launcher: BrowserWindow,
@@ -187,7 +195,8 @@ export class ScreenshotController {
    * Holding the hotkey makes Windows auto-repeat it every ~30ms; each repeat
    * would restart the capture, so the overlay never appears until release.
    * Triggers that follow the previous one within HOTKEY_REPEAT_GAP_MS are
-   * treated as auto-repeat and ignored.
+   * treated as auto-repeat and ignored. Closing the overlay clears the timer
+   * (see closeOverlay), since a held key cannot outlive the overlay it opened.
    */
   private onHotkey(): void {
     const now = Date.now();
@@ -288,6 +297,11 @@ export class ScreenshotController {
   private async capture(token: number, hideLauncher: boolean): Promise<void> {
     const timing = new CaptureTiming(this.lastOpenAt);
     this.lastOpenAt = Date.now();
+    // Opening the overlay supersedes any long-screenshot session in progress.
+    if (this.longSession) {
+      this.longSession.dispose();
+      this.endLongCapture();
+    }
     // No-op when the resident worker is already warm; restarts it if it died.
     warmupOcr();
 
@@ -312,6 +326,7 @@ export class ScreenshotController {
     }
 
     const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    this.captureDisplayInfo = display;
     const capture = await this.captureDisplay(display);
     if (token !== this.captureToken) return;
     timing.mark(capture.native ? "captureGdi" : "captureFallback");
@@ -469,6 +484,9 @@ export class ScreenshotController {
 
   private closeOverlay(): void {
     this.resetOverlay();
+    // The user dismissed the overlay, so the next hotkey press is a new press,
+    // not auto-repeat from a held key; let it through immediately.
+    this.lastHotkeyAt = 0;
   }
 
   /** True when the IPC call came from the live overlay window. */
@@ -570,6 +588,256 @@ export class ScreenshotController {
         provider: result.provider,
       };
     });
+
+    ipcMain.handle("screenshot:ocr-layout", async (event, dataUrl: unknown) => {
+      if (!this.fromOverlay(event)) return { text: "", lines: [] };
+      const image = this.decodeImage(dataUrl);
+      if (!image) throw new Error("无效的图片数据");
+      const temporary = path.join(
+        tmpdir(),
+        `dockwisp-ocr-${Date.now()}-${Math.random().toString(36).slice(2)}.png`,
+      );
+      const size = image.getSize();
+      const resized = ocrResizeDimensions(size.width, size.height);
+      const ocrImage = resized ? image.resize({ ...resized, quality: "best" }) : image;
+      // The OCR boxes come back in the (possibly upscaled) image's pixels, so
+      // divide them back to the submitted image's coordinate space.
+      const scaleX = resized ? size.width / resized.width : 1;
+      const scaleY = resized ? size.height / resized.height : 1;
+      await writeFile(temporary, ocrImage.toPNG());
+      const timing = new CaptureTiming(0);
+      try {
+        const result = await recognizeImageLayout(temporary);
+        timing.mark("ocr");
+        timing.write(`ocr-layout ${size.width}x${size.height} lines=${result.lines.length}`);
+        return {
+          text: result.text,
+          lines: result.lines.map((line) => ({
+            text: line.text,
+            box: {
+              x: line.box.x * scaleX,
+              y: line.box.y * scaleY,
+              width: line.box.width * scaleX,
+              height: line.box.height * scaleY,
+            },
+          })),
+        };
+      } finally {
+        await unlink(temporary).catch(() => undefined);
+      }
+    });
+
+    ipcMain.handle("screenshot:translate-batch", async (event, texts: unknown) => {
+      if (!this.fromOverlay(event)) throw new Error("请求来源无效");
+      return this.translateBatch(Array.isArray(texts) ? texts : []);
+    });
+
+    ipcMain.handle("screenshot:pin", async (event, payload: unknown) => {
+      if (!this.fromOverlay(event)) return false;
+      const display = this.captureDisplayInfo;
+      if (!display) return false;
+      const data = (payload ?? {}) as Partial<PinPayload>;
+      if (
+        typeof data.dataUrl !== "string" ||
+        typeof data.x !== "number" ||
+        typeof data.y !== "number" ||
+        typeof data.width !== "number" ||
+        typeof data.height !== "number"
+      ) {
+        return false;
+      }
+      const created = this.pins.create(
+        {
+          dataUrl: data.dataUrl,
+          x: data.x,
+          y: data.y,
+          width: data.width,
+          height: data.height,
+        },
+        display,
+      );
+      // Pinning replaces the overlay: dismiss it so the pin stays on screen.
+      if (created) this.closeOverlay();
+      return created;
+    });
+
+    ipcMain.on("screenshot:long-start", (event, rect: unknown) => {
+      if (!this.fromOverlay(event)) return;
+      this.startLongCapture(rect);
+    });
+  }
+
+  /**
+   * Translate several texts at once for the layout-OCR overlay. The language
+   * pair is detected once over all texts joined, then forced on every segment
+   * so the direction is identical for each line (matching the legacy whole-text
+   * behaviour: Chinese→English, everything else→Chinese). Empty strings pass
+   * through untouched; a segment that fails to translate falls back to its
+   * original text, and only a total failure throws. Concurrency is capped at 3
+   * and the output is index-aligned with the input.
+   */
+  private async translateBatch(texts: unknown[]): Promise<{
+    translations: string[];
+    sourceLanguage: string;
+    targetLanguage: string;
+    provider: string;
+  }> {
+    const inputs = texts.map((item) => (typeof item === "string" ? item : ""));
+    const translation = this.settings.get().translation;
+    const providerName = translation.provider === "libretranslate" ? "LibreTranslate" : "MyMemory";
+    const pair = detectLanguagePair(inputs.join("\n"));
+
+    const translations = new Array<string>(inputs.length).fill("");
+    const indices = inputs.map((_, index) => index).filter((index) => inputs[index].trim() !== "");
+    let anySuccess = false;
+    let firstError: Error | null = null;
+
+    const CONCURRENCY = 3;
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (cursor < indices.length) {
+        const index = indices[cursor++];
+        const text = inputs[index];
+        try {
+          const result = await translateText({
+            text,
+            provider: translation.provider,
+            endpoint: translation.endpoint,
+            apiKey: translation.apiKey,
+            source: pair.source,
+            target: pair.target,
+          });
+          translations[index] = result.translatedText;
+          anySuccess = true;
+        } catch (error) {
+          translations[index] = text;
+          if (!firstError) firstError = error instanceof Error ? error : new Error(String(error));
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, indices.length) }, worker));
+
+    if (indices.length > 0 && !anySuccess && firstError) throw firstError;
+    return {
+      translations,
+      sourceLanguage: pair.source,
+      targetLanguage: pair.target,
+      provider: providerName,
+    };
+  }
+
+  /**
+   * Begin a manual long screenshot over the given region (image physical
+   * pixels, relative to the capture display). The overlay is hidden without a
+   * reset so its selection state survives, then restored when the session
+   * ends. Without a native helper the feature is unavailable, so the renderer
+   * is simply told the capture was cancelled.
+   */
+  private startLongCapture(rect: unknown): void {
+    const overlay = this.overlay;
+    const display = this.captureDisplayInfo;
+    if (!overlay || overlay.isDestroyed() || !display) return;
+
+    const data = (rect ?? {}) as Partial<LongCaptureRect>;
+    if (
+      typeof data.x !== "number" ||
+      typeof data.y !== "number" ||
+      typeof data.width !== "number" ||
+      typeof data.height !== "number" ||
+      data.width < 1 ||
+      data.height < 1
+    ) {
+      return;
+    }
+
+    if (!this.helper) {
+      // No GDI helper: cannot stream frames. Leave the overlay as-is and tell
+      // the renderer the long capture did not happen.
+      overlay.webContents.send("screenshot:long-cancel");
+      return;
+    }
+
+    if (this.longSession) {
+      this.longSession.dispose();
+      this.endLongCapture();
+    }
+
+    // Disarm blur-close and hide the overlay WITHOUT resetting the renderer so
+    // the selection is still there when we come back.
+    this.blurCloseArmed = false;
+    this.suppressBlurClose = true;
+    if (this.revealTimer) {
+      clearTimeout(this.revealTimer);
+      this.revealTimer = null;
+    }
+    if (overlay.isVisible()) overlay.hide();
+
+    const escapeHandler = (): void => this.longSession?.cancel();
+    try {
+      globalShortcut.register("Escape", escapeHandler);
+    } catch {
+      // A failed Escape registration is non-fatal; the preview's 取消 still works.
+    }
+
+    const session = new LongCaptureSession(
+      this.helper,
+      display,
+      { x: data.x, y: data.y, width: data.width, height: data.height },
+      {
+        onComplete: (result) => {
+          this.endLongCapture();
+          this.restoreOverlayAfterLong(overlay);
+          if (!overlay.isDestroyed()) {
+            overlay.webContents.send("screenshot:long-result", result);
+          }
+        },
+        onCancel: () => {
+          this.endLongCapture();
+          this.restoreOverlayAfterLong(overlay);
+          if (!overlay.isDestroyed()) overlay.webContents.send("screenshot:long-cancel");
+        },
+      },
+    );
+    this.longSession = session;
+    session.start();
+  }
+
+  /** Clear the Escape shortcut and drop the finished long-capture session. */
+  private endLongCapture(): void {
+    this.longSession = null;
+    try {
+      globalShortcut.unregister("Escape");
+    } catch {
+      // Ignore: the shortcut may already be gone.
+    }
+  }
+
+  /** Re-show the overlay over its display and re-arm blur-to-close. */
+  private restoreOverlayAfterLong(overlay: BrowserWindow): void {
+    if (this.overlay !== overlay || overlay.isDestroyed()) return;
+    const display = this.captureDisplayInfo;
+    if (display) {
+      overlay.setBounds({
+        x: display.bounds.x,
+        y: display.bounds.y,
+        width: display.bounds.width,
+        height: display.bounds.height,
+      });
+    }
+    overlay.setAlwaysOnTop(true, "screen-saver");
+    overlay.show();
+    overlay.focus();
+    if (this.helper) {
+      const handle = overlay.getNativeWindowHandle();
+      const nativeHandle =
+        handle.length >= 8 ? handle.readBigUInt64LE(0) : BigInt(handle.readUInt32LE(0));
+      void this.helper.focusWindow(nativeHandle).catch(() => undefined);
+    }
+    this.suppressBlurClose = false;
+    // Re-arm blur-close after focus settles, mirroring place().
+    setTimeout(() => {
+      if (this.overlay === overlay && !overlay.isDestroyed()) this.blurCloseArmed = true;
+    }, 400);
   }
 
   /** Validate a data URL and turn it into a non-empty nativeImage, or null. */

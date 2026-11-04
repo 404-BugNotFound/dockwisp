@@ -1,0 +1,18 @@
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+
+/* A 3px marching-style border drawn on the window's outer edge; the interior
+   is fully transparent so the captured region underneath is never obscured. */
+#frame {
+  position: fixed;
+  inset: 0;
+  border: 3px solid #4d9bff;
+  box-sizing: border-box;
+  pointer-events: none;
+}

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>长截图</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div id="panel">
+      <div id="tip">滚动鼠标滚轮以截取长图</div>
+      <div id="viewport">
+        <img id="thumb" alt="" draggable="false" />
+      </div>
+      <div id="status"><span id="heightLabel">0</span> 像素</div>
+      <div id="actions">
+        <button id="cancel" type="button">取消</button>
+        <button id="done" type="button" class="primary">完成</button>
+      </div>
+    </div>
+  </body>
+</html>
