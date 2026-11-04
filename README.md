@@ -52,9 +52,11 @@ Dockwisp 是一个 Windows 桌面启动器：搜应用、搜文件、切窗口�
 ### 文件与文本处理
 
 - **文件转换**：把文件拖进搜索框，或者在资源管理器里复制后粘贴进来，就会列出可以转换的目标格式。
-  - 图片之间互转（png / jpg / webp / avif / tiff / gif / bmp / ico），图片转 PDF
-  - Markdown / HTML / 纯文本转 PDF，JSON / YAML / CSV / XML 互转
-  - Word / Excel / PPT 与 PDF 互转：首次使用时会提示下载一次 LibreOffice 便携组件（约 358 MB，无需管理员权限，不依赖本机 Office）。PDF 转 Word 适合提取内容再编辑，复杂版式无法完全还原。
+  - 图片之间互转（png / jpg / webp / avif / tiff / gif / bmp / ico / svg），按照片的拍摄方向自动转正；动图 GIF 与 WebP 互转时保留动画
+  - 图片转 PDF（每页一张，横图自动横向排版）；在转换窗口里可把多张图片合并成一个 PDF
+  - Markdown（支持表格、任务列表）/ HTML / 纯文本转 PDF，JSON / YAML / CSV / XML 互转；GBK 编码的文本也能正确识别
+  - Word / Excel / PPT 转 PDF 及互转：首次使用时会提示下载一次 LibreOffice 便携组件（约 358 MB，无需管理员权限，不依赖本机 Office）。Excel 转 PDF 可选“每个工作表缩到一页”，转 CSV 时每个工作表各输出一个文件。
+  - PDF 转 Word、PDF 转图片：首次使用时会提示下载一次 PDF 转换组件（pdf2docx 及其 Python 运行环境，约 88 MB）。转 Word 时文字按段落还原，可直接编辑，扫描版页面会先用内置 OCR 识别成文字；复杂表格和多栏排版仍可能需要手动调整。转图片时每页输出一张，放在与 PDF 同名的文件夹里。
 - **文本对比**：左右两栏对比两段文本，差异高亮。
 - **hosts 切换**：保存多套 hosts 方案，开发、测试环境一键切换。
 
@@ -88,7 +90,7 @@ Dockwisp 是一个 Windows 桌面启动器：搜应用、搜文件、切窗口�
 ## 隐私
 
 - 应用搜索、文件搜索、截图、文字识别、文件预览和大多数格式转换都在本机完成，不会上传。
-- 只有这几项会联网：在线翻译（默认 MyMemory，可改为自建 LibreTranslate）、汇率换算获取最新汇率、检查更新访问 GitHub、首次使用 Office 转换时下载 LibreOffice。
+- 只有这几项会联网：在线翻译（默认 MyMemory，可改为自建 LibreTranslate）、汇率换算获取最新汇率、检查更新访问 GitHub、首次使用 Office 转换时下载 LibreOffice、首次使用 PDF 转 Word 时下载 pdf2docx 组件。
 - 不需要账号，不收集使用数据。
 
 ## 从源码构建

@@ -26,10 +26,13 @@
   },
   "dependencies": {
     "@electron/asar": "4.3.1",
+    "iconv-lite": "0.7.3",
+    "marked": "18.1.3",
     "onnxruntime-node": "1.29.0",
     "pinyin-pro": "3.29.5",
     "ppu-paddle-ocr": "6.6.1",
-    "sharp": "0.35.5"
+    "sharp": "0.35.5",
+    "yaml": "2.9.1"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",

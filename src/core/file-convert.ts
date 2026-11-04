@@ -1,10 +1,13 @@
 /**
  * Pure conversion logic for the built-in "file convert" tool. This module never
  * imports electron, sharp, or touches the filesystem: it owns the format table,
- * target enumeration, output naming, the text/data converters (YAML / CSV /
- * Markdown / XML) and the hand-rolled BMP / ICO encoders and decoders.
- * Everything here is unit-tested.
+ * target enumeration, output naming, text decoding, the text/data converters
+ * (YAML / CSV / Markdown / XML) and the hand-rolled BMP / ICO encoders and
+ * decoders. Everything here is unit-tested.
  */
+
+import iconv from "iconv-lite";
+import YAML from "yaml";
 
 export type ConvertCategory =
   | "image"
@@ -14,25 +17,31 @@ export type ConvertCategory =
   | "presentation";
 
 /**
- * Runtime capabilities the controller injects when listing targets. The only
- * external engine now is LibreOffice (downloaded on first use); `office` is
- * true once it is installed under userData.
+ * Runtime capabilities the controller injects when listing targets. Both
+ * external engines are downloaded on first use into userData.
  */
 export interface Capabilities {
   /** LibreOffice is downloaded and ready. */
   office: boolean;
+  /** The pdf2docx (PDF -> Word) runtime is downloaded and ready. */
+  pdfword: boolean;
 }
 
 export const EMPTY_CAPABILITIES: Capabilities = {
   office: false,
+  pdfword: false,
 };
+
+/** A downloadable engine a target depends on. */
+export type ConvertComponent = "office" | "pdfword";
 
 /** How a conversion is carried out, so the controller can route each request. */
 export type ConvertEngine =
   | "image" // decoded / encoded with sharp (+ BMP/ICO helpers) in main
   | "data" // pure text transform in this module
   | "pdf" // rendered with a hidden BrowserWindow + printToPDF
-  | "office"; // LibreOffice (downloaded on first use)
+  | "office" // LibreOffice (downloaded on first use)
+  | "pdfword"; // pdf2docx + PaddleOCR for scanned pages (downloaded on first use)
 
 /**
  * A conversion target offered for a file. This is the shape the launcher and
@@ -46,12 +55,16 @@ export interface TargetFormat {
   engine: ConvertEngine;
   /** Whether the target can be produced right now. */
   available: boolean;
-  /** True for an office target when LibreOffice is not yet downloaded. */
+  /** True when the target's engine is not yet downloaded. */
   needsDownload?: boolean;
+  /** The downloadable engine this target needs, if any. */
+  component?: ConvertComponent;
   /** Extra hint shown in the UI, e.g. fidelity caveats. */
   note?: string;
   /** True for formats that accept a quality slider (jpg / webp / avif). */
   quality?: boolean;
+  /** True for spreadsheet -> PDF, which can scale each sheet onto one page. */
+  fitSheets?: boolean;
 }
 
 // Image inputs sharp can decode directly, plus bmp/ico/gif handled specially.
@@ -93,6 +106,9 @@ const OFFICE_LABELS: Record<string, string> = {
 };
 
 const OFFICE_NOTE_DOWNLOAD = "需下载文档转换组件（首次使用）";
+const PDFWORD_NOTE_DOWNLOAD = "需下载 PDF 转换组件（首次使用）";
+const PDFWORD_NOTE = "扫描页自动识别文字";
+const PDF_IMAGES_NOTE = "输出到同名文件夹";
 
 /** Lower-case extension without the leading dot ("" when none). */
 export function extensionOf(filePath: string): string {
@@ -186,9 +202,21 @@ export function listTargetFormats(ext: string, caps: Capabilities): TargetFormat
   }
 
   if (category === "document") {
-    // pdf -> docx uses LibreOffice's PDF import filter; fidelity is limited.
+    // pdf -> docx uses pdf2docx, with OCR for scanned pages. pdf -> png/jpg
+    // renders every page with PyMuPDF from the same component.
     if (e === "pdf") {
-      push(officeTarget("docx", caps, "版式还原度一般"));
+      const pdfword = (id: string, label: string, note: string): TargetFormat => ({
+        id,
+        label,
+        engine: "pdfword",
+        available: caps.pdfword,
+        needsDownload: !caps.pdfword,
+        component: "pdfword",
+        note: caps.pdfword ? note : PDFWORD_NOTE_DOWNLOAD,
+      });
+      push(pdfword("docx", OFFICE_LABELS.docx, PDFWORD_NOTE));
+      push(pdfword("png", "PNG 图片（每页一张）", PDF_IMAGES_NOTE));
+      push(pdfword("jpg", "JPG 图片（每页一张）", PDF_IMAGES_NOTE));
       return targets;
     }
     for (const out of ["pdf", "docx", "odt", "txt", "html"]) {
@@ -199,7 +227,7 @@ export function listTargetFormats(ext: string, caps: Capabilities): TargetFormat
 
   if (category === "spreadsheet") {
     for (const out of ["pdf", "xlsx", "ods", "csv"]) {
-      push(officeTarget(out, caps));
+      push(out === "pdf" ? { ...officeTarget(out, caps), fitSheets: true } : officeTarget(out, caps));
     }
     return targets;
   }
@@ -211,7 +239,7 @@ export function listTargetFormats(ext: string, caps: Capabilities): TargetFormat
   return targets;
 }
 
-function officeTarget(ext: string, caps: Capabilities, note?: string): TargetFormat {
+function officeTarget(ext: string, caps: Capabilities): TargetFormat {
   const label = OFFICE_LABELS[ext] ?? ext.toUpperCase();
   return {
     id: ext,
@@ -219,7 +247,8 @@ function officeTarget(ext: string, caps: Capabilities, note?: string): TargetFor
     engine: "office",
     available: caps.office,
     needsDownload: !caps.office,
-    note: note ?? (!caps.office ? OFFICE_NOTE_DOWNLOAD : undefined),
+    component: "office",
+    note: !caps.office ? OFFICE_NOTE_DOWNLOAD : undefined,
   };
 }
 
@@ -270,315 +299,77 @@ export function resolveOutputPath(
   return joinPath(dir, `${stem} (${Date.now()}).${ext}`);
 }
 
-// --- YAML (common subset) -------------------------------------------------
-
-type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-
-/** Serialise a JSON value into a compact, readable YAML subset. */
-export function jsonToYaml(value: unknown): string {
-  const lines: string[] = [];
-  writeYaml(value as Json, 0, lines, false);
-  const body = lines.join("\n");
-  return body.endsWith("\n") ? body : `${body}\n`;
-}
-
-function writeYaml(value: Json, indent: number, lines: string[], inline: boolean): void {
-  const pad = "  ".repeat(indent);
-  if (Array.isArray(value)) {
-    if (value.length === 0) {
-      lines.push(`${pad}[]`);
-      return;
-    }
-    for (const item of value) {
-      if (isContainer(item) && !isEmptyContainer(item)) {
-        lines.push(`${pad}-`);
-        writeYaml(item, indent + 1, lines, false);
-      } else {
-        lines.push(`${pad}- ${scalarYaml(item)}`);
-      }
-    }
-    return;
+/** Like resolveOutputPath, for a folder named `stem` (" (1)", … on collision). */
+export function resolveOutputDir(
+  dir: string,
+  stem: string,
+  exists: (candidate: string) => boolean,
+): string {
+  const first = joinPath(dir, stem);
+  if (!exists(first)) return first;
+  for (let n = 1; n < 10_000; n += 1) {
+    const candidate = joinPath(dir, `${stem} (${n})`);
+    if (!exists(candidate)) return candidate;
   }
-  if (isPlainObject(value)) {
-    const keys = Object.keys(value);
-    if (keys.length === 0) {
-      lines.push(`${pad}{}`);
-      return;
-    }
-    for (const key of keys) {
-      const child = value[key];
-      const keyText = yamlKey(key);
-      if (isContainer(child) && !isEmptyContainer(child)) {
-        lines.push(`${pad}${keyText}:`);
-        writeYaml(child, indent + 1, lines, false);
-      } else {
-        lines.push(`${pad}${keyText}: ${scalarYaml(child)}`);
-      }
-    }
-    return;
-  }
-  // Bare scalar document.
-  lines.push(`${pad}${scalarYaml(value)}`);
+  return joinPath(dir, `${stem} (${Date.now()})`);
 }
 
-function isContainer(value: Json): value is Json[] | { [key: string]: Json } {
-  return Array.isArray(value) || isPlainObject(value);
-}
-function isEmptyContainer(value: Json): boolean {
-  if (Array.isArray(value)) return value.length === 0;
-  if (isPlainObject(value)) return Object.keys(value).length === 0;
-  return false;
-}
-function isPlainObject(value: Json): value is { [key: string]: Json } {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+// --- Text decoding --------------------------------------------------------
 
-function yamlKey(key: string): string {
-  return /^[A-Za-z0-9_][A-Za-z0-9_\- ]*$/.test(key) && !/^\s|\s$/.test(key)
-    ? key
-    : JSON.stringify(key);
-}
-
-function scalarYaml(value: Json): string {
-  if (value === null) return "null";
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "null";
-  if (Array.isArray(value)) return "[]";
-  if (isPlainObject(value)) return "{}";
-  const text = String(value);
-  if (text === "") return '""';
-  // Quote when the value could be mistaken for another type or contains YAML
-  // punctuation that would break parsing.
-  if (
-    /^(null|true|false|~|yes|no|on|off)$/i.test(text) ||
-    /^[-+]?[\d.][\d.eE+-]*$/.test(text) ||
-    /[:#\[\]{}>,&*!|%@`"']/.test(text) ||
-    /^[\s-]/.test(text) ||
-    /\s$/.test(text) ||
-    text.includes("\n")
-  ) {
-    return JSON.stringify(text);
+/**
+ * Decode a text file's bytes. Honours UTF-8 / UTF-16 BOMs, accepts valid
+ * UTF-8 without a BOM, and otherwise falls back to GB18030 (a superset of
+ * GBK/GB2312), which is what Notepad and Excel write on Chinese Windows.
+ */
+export function decodeText(bytes: Uint8Array): string {
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return new TextDecoder("utf-8").decode(bytes.subarray(3));
   }
-  return text;
-}
-
-/** Parse a YAML subset into JSON. Throws on constructs it does not support. */
-export function parseYaml(text: string): unknown {
-  const rawLines = text.replace(/\r\n?/g, "\n").split("\n");
-  const lines: Array<{ indent: number; content: string }> = [];
-  for (const raw of rawLines) {
-    const noComment = stripComment(raw);
-    if (noComment.trim() === "" || noComment.trim() === "---") continue;
-    const indent = noComment.length - noComment.trimStart().length;
-    lines.push({ indent, content: noComment.trim() });
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return new TextDecoder("utf-16le").decode(bytes.subarray(2));
   }
-  if (lines.length === 0) return null;
-  const [value, next] = parseBlock(lines, 0, lines[0].indent);
-  if (next !== lines.length) {
-    throw new Error("YAML 结构无法解析（缩进不一致）");
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return new TextDecoder("utf-16be").decode(bytes.subarray(2));
   }
-  return value;
-}
-
-function stripComment(line: string): string {
-  let inSingle = false;
-  let inDouble = false;
-  for (let i = 0; i < line.length; i += 1) {
-    const ch = line[i];
-    if (ch === "'" && !inDouble) inSingle = !inSingle;
-    else if (ch === '"' && !inSingle) inDouble = !inDouble;
-    else if (ch === "#" && !inSingle && !inDouble && (i === 0 || line[i - 1] === " " || line[i - 1] === "\t")) {
-      return line.slice(0, i);
-    }
-  }
-  return line;
-}
-
-function parseBlock(
-  lines: Array<{ indent: number; content: string }>,
-  start: number,
-  indent: number,
-): [unknown, number] {
-  if (start >= lines.length) return [null, start];
-  const first = lines[start];
-  if (first.content.startsWith("- ") || first.content === "-") {
-    return parseSequence(lines, start, indent);
-  }
-  return parseMapping(lines, start, indent);
-}
-
-function parseSequence(
-  lines: Array<{ indent: number; content: string }>,
-  start: number,
-  indent: number,
-): [unknown[], number] {
-  const result: unknown[] = [];
-  let i = start;
-  while (i < lines.length && lines[i].indent === indent) {
-    const line = lines[i];
-    if (!(line.content === "-" || line.content.startsWith("- "))) break;
-    const rest = line.content === "-" ? "" : line.content.slice(2).trim();
-    if (rest === "") {
-      // Nested block on the following deeper lines.
-      if (i + 1 < lines.length && lines[i + 1].indent > indent) {
-        const [value, next] = parseBlock(lines, i + 1, lines[i + 1].indent);
-        result.push(value);
-        i = next;
-      } else {
-        result.push(null);
-        i += 1;
-      }
-    } else if (looksLikeInlineMapping(rest)) {
-      // "- key: value" starts a mapping whose first key sits on the dash line.
-      const synthetic = [{ indent: indent + 2, content: rest }, ...lines.slice(i + 1)];
-      const [value, consumed] = parseMapping(synthetic, 0, indent + 2);
-      result.push(value);
-      // consumed counts entries in `synthetic`; the first was the inline one.
-      i = i + consumed;
-    } else {
-      result.push(parseScalar(rest));
-      i += 1;
-    }
-  }
-  return [result, i];
-}
-
-function looksLikeInlineMapping(content: string): boolean {
-  const colon = findKeyColon(content);
-  return colon !== -1;
-}
-
-function parseMapping(
-  lines: Array<{ indent: number; content: string }>,
-  start: number,
-  indent: number,
-): [Record<string, unknown>, number] {
-  const result: Record<string, unknown> = {};
-  let i = start;
-  while (i < lines.length && lines[i].indent === indent) {
-    const line = lines[i];
-    if (line.content.startsWith("- ") || line.content === "-") break;
-    const colon = findKeyColon(line.content);
-    if (colon === -1) {
-      throw new Error(`YAML 无法解析该行：${line.content}`);
-    }
-    const key = unquoteKey(line.content.slice(0, colon).trim());
-    const valuePart = line.content.slice(colon + 1).trim();
-    if (valuePart === "") {
-      if (i + 1 < lines.length && lines[i + 1].indent > indent) {
-        const [value, next] = parseBlock(lines, i + 1, lines[i + 1].indent);
-        result[key] = value;
-        i = next;
-      } else {
-        result[key] = null;
-        i += 1;
-      }
-    } else {
-      result[key] = parseScalar(valuePart);
-      i += 1;
-    }
-  }
-  return [result, i];
-}
-
-/** Index of the ":" that separates a mapping key from its value (or -1). */
-function findKeyColon(content: string): number {
-  let inSingle = false;
-  let inDouble = false;
-  for (let i = 0; i < content.length; i += 1) {
-    const ch = content[i];
-    if (ch === "'" && !inDouble) inSingle = !inSingle;
-    else if (ch === '"' && !inSingle) inDouble = !inDouble;
-    else if (ch === ":" && !inSingle && !inDouble) {
-      if (i === content.length - 1 || content[i + 1] === " ") return i;
-    }
-  }
-  return -1;
-}
-
-function unquoteKey(key: string): string {
-  if ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'"))) {
-    return parseScalar(key) as string;
-  }
-  return key;
-}
-
-function parseScalar(raw: string): unknown {
-  const text = raw.trim();
-  if (text === "" || text === "~" || text.toLowerCase() === "null") return null;
-  if (text === "[]") return [];
-  if (text === "{}") return {};
-  if (text.toLowerCase() === "true") return true;
-  if (text.toLowerCase() === "false") return false;
-  if (text.startsWith('"')) {
-    if (!text.endsWith('"') || text.length < 2) throw new Error(`YAML 字符串未闭合：${text}`);
-    return JSON.parse(text);
-  }
-  if (text.startsWith("'")) {
-    if (!text.endsWith("'") || text.length < 2) throw new Error(`YAML 字符串未闭合：${text}`);
-    return text.slice(1, -1).replace(/''/g, "'");
-  }
-  if (text.startsWith("[") || text.startsWith("{")) {
-    // Flow collections are converted to JSON-ish and parsed.
-    return parseFlow(text);
-  }
-  if (/^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(text)) {
-    const num = Number(text);
-    if (Number.isFinite(num)) return num;
-  }
-  return text;
-}
-
-/** Parse a YAML flow collection ([a, b] / {k: v}) by reusing JSON rules. */
-function parseFlow(text: string): unknown {
-  const jsonish = flowToJson(text);
   try {
-    return JSON.parse(jsonish);
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
-    throw new Error(`YAML 行内集合无法解析：${text}`);
+    return iconv.decode(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength), "gb18030");
   }
 }
 
-function flowToJson(text: string): string {
-  // Wrap bare words / keys in quotes so JSON.parse accepts them.
-  let out = "";
-  let i = 0;
-  while (i < text.length) {
-    const ch = text[i];
-    if (ch === '"' || ch === "'") {
-      const quote = ch;
-      let token = "";
-      i += 1;
-      while (i < text.length && text[i] !== quote) {
-        token += text[i];
-        i += 1;
-      }
-      i += 1;
-      out += JSON.stringify(token);
-      continue;
-    }
-    if (/[\[\]{}:,]/.test(ch)) {
-      out += ch === ":" ? ":" : ch;
-      i += 1;
-      continue;
-    }
-    if (/\s/.test(ch)) {
-      out += "";
-      i += 1;
-      continue;
-    }
-    // Bare token up to the next structural char.
-    let token = "";
-    while (i < text.length && !/[\[\]{}:,]/.test(text[i])) {
-      token += text[i];
-      i += 1;
-    }
-    const trimmed = token.trim();
-    if (/^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(trimmed)) out += trimmed;
-    else if (trimmed === "true" || trimmed === "false" || trimmed === "null") out += trimmed;
-    else out += JSON.stringify(trimmed);
-  }
+/** UTF-8 with a BOM, so Excel on Chinese Windows opens CSV correctly. */
+export function encodeCsvText(text: string): Uint8Array {
+  const body = new TextEncoder().encode(text);
+  const out = new Uint8Array(body.length + 3);
+  out.set([0xef, 0xbb, 0xbf], 0);
+  out.set(body, 3);
   return out;
+}
+
+// --- YAML -----------------------------------------------------------------
+
+/** Serialise a JSON value into YAML. */
+export function jsonToYaml(value: unknown): string {
+  return YAML.stringify(value, { lineWidth: 0 });
+}
+
+/**
+ * Parse YAML (1.2, including block scalars, anchors and multiple documents)
+ * into JSON. A multi-document stream becomes an array of documents.
+ */
+export function parseYaml(text: string): unknown {
+  // `merge` enables the "<<" merge key that docker-compose files rely on.
+  const docs = YAML.parseAllDocuments(text, { merge: true });
+  const list = Array.isArray(docs) ? docs : [docs];
+  for (const doc of list) {
+    if (doc.errors.length > 0) {
+      throw new Error(`YAML 解析失败：${doc.errors[0].message.split("\n")[0]}`);
+    }
+  }
+  const values = list.map((doc) => doc.toJS({ maxAliasCount: 1_000 }));
+  if (values.length === 0) return null;
+  return values.length === 1 ? values[0] : values;
 }
 
 // --- CSV ------------------------------------------------------------------
@@ -734,25 +525,34 @@ function xmlEscape(text: string): string {
 
 // --- Markdown -> HTML -----------------------------------------------------
 
-/** Render a basic Markdown subset to a standalone HTML document. */
-export function markdownToHtml(markdown: string, title = "Document"): string {
-  const body = renderMarkdownBody(markdown);
+const MARKDOWN_STYLE = [
+  "body{font-family:'Segoe UI','Microsoft YaHei',system-ui,sans-serif;line-height:1.7;max-width:820px;margin:40px auto;padding:0 24px;color:#1d1f27;}",
+  "h1,h2,h3,h4{line-height:1.3;margin:1.4em 0 .6em;}",
+  "code{background:#f1f2f6;padding:.15em .4em;border-radius:4px;font-family:Consolas,monospace;}",
+  "pre{background:#f6f7f9;border:1px solid #e3e5ea;padding:14px 16px;border-radius:8px;overflow:auto;white-space:pre-wrap;word-break:break-word;}",
+  "pre code{background:none;padding:0;}",
+  "blockquote{margin:1em 0;padding:.4em 1em;border-left:4px solid #d0d3dc;color:#5b606c;}",
+  "table{border-collapse:collapse;margin:1em 0;}th,td{border:1px solid #d0d3dc;padding:6px 12px;}th{background:#f6f7f9;}",
+  "img{max-width:100%;}a{color:#2563eb;}",
+  "li>input[type=checkbox]{margin-right:.4em;}",
+  "@media print{body{margin:0 auto;max-width:none;}pre,blockquote,table,img{break-inside:avoid;}img{max-height:240mm;object-fit:contain;}}",
+].join("");
+
+/**
+ * Render GitHub-flavoured Markdown (tables, task lists, nested lists, fenced
+ * code) to a standalone HTML document. `baseHref` lets relative image links
+ * resolve against the source file's folder.
+ */
+export async function markdownToHtml(markdown: string, title = "Document", baseHref?: string): Promise<string> {
+  const body = await renderMarkdownBody(markdown);
   return [
     "<!doctype html>",
     '<html lang="zh-CN">',
     "<head>",
     '<meta charset="UTF-8">',
+    ...(baseHref ? [`<base href="${xmlEscape(baseHref)}">`] : []),
     `<title>${xmlEscape(title)}</title>`,
-    "<style>",
-    "body{font-family:'Segoe UI','Microsoft YaHei',system-ui,sans-serif;line-height:1.7;max-width:820px;margin:40px auto;padding:0 24px;color:#1d1f27;}",
-    "h1,h2,h3,h4{line-height:1.3;margin:1.4em 0 .6em;}",
-    "code{background:#f1f2f6;padding:.15em .4em;border-radius:4px;font-family:Consolas,monospace;}",
-    "pre{background:#1b1c23;color:#f1f2f6;padding:14px 16px;border-radius:8px;overflow:auto;}",
-    "pre code{background:none;padding:0;color:inherit;}",
-    "blockquote{margin:1em 0;padding:.4em 1em;border-left:4px solid #d0d3dc;color:#5b606c;}",
-    "table{border-collapse:collapse;margin:1em 0;}th,td{border:1px solid #d0d3dc;padding:6px 12px;}",
-    "img{max-width:100%;}a{color:#2563eb;}",
-    "</style>",
+    `<style>${MARKDOWN_STYLE}</style>`,
     "</head>",
     "<body>",
     body,
@@ -763,117 +563,11 @@ export function markdownToHtml(markdown: string, title = "Document"): string {
 }
 
 /** Render just the Markdown body fragment (no surrounding document). */
-export function renderMarkdownBody(markdown: string): string {
-  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
-  const out: string[] = [];
-  let i = 0;
-  let inList = false;
-  let listOrdered = false;
-  const closeList = (): void => {
-    if (inList) {
-      out.push(listOrdered ? "</ol>" : "</ul>");
-      inList = false;
-    }
-  };
-  while (i < lines.length) {
-    const line = lines[i];
-    // Fenced code block.
-    const fence = /^```(.*)$/.exec(line.trim());
-    if (fence) {
-      closeList();
-      const codeLines: string[] = [];
-      i += 1;
-      while (i < lines.length && !/^```/.test(lines[i].trim())) {
-        codeLines.push(lines[i]);
-        i += 1;
-      }
-      i += 1; // skip closing fence
-      out.push(`<pre><code>${xmlEscape(codeLines.join("\n"))}</code></pre>`);
-      continue;
-    }
-    if (line.trim() === "") {
-      closeList();
-      i += 1;
-      continue;
-    }
-    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-    if (heading) {
-      closeList();
-      const level = heading[1].length;
-      out.push(`<h${level}>${renderInline(heading[2].trim())}</h${level}>`);
-      i += 1;
-      continue;
-    }
-    if (/^\s*>/.test(line)) {
-      closeList();
-      const quote: string[] = [];
-      while (i < lines.length && /^\s*>/.test(lines[i])) {
-        quote.push(lines[i].replace(/^\s*>\s?/, ""));
-        i += 1;
-      }
-      out.push(`<blockquote>${renderInline(quote.join(" "))}</blockquote>`);
-      continue;
-    }
-    if (/^\s*([-*_])\1{0,}\s*$/.test(line) && line.replace(/\s/g, "").length >= 3) {
-      closeList();
-      out.push("<hr>");
-      i += 1;
-      continue;
-    }
-    const ordered = /^\s*\d+\.\s+(.*)$/.exec(line);
-    const unordered = /^\s*[-*+]\s+(.*)$/.exec(line);
-    if (ordered || unordered) {
-      const wantOrdered = Boolean(ordered);
-      if (!inList || listOrdered !== wantOrdered) {
-        closeList();
-        listOrdered = wantOrdered;
-        inList = true;
-        out.push(listOrdered ? "<ol>" : "<ul>");
-      }
-      const content = (ordered ? ordered[1] : unordered![1]).trim();
-      out.push(`<li>${renderInline(content)}</li>`);
-      i += 1;
-      continue;
-    }
-    // Paragraph: gather consecutive text lines.
-    closeList();
-    const para: string[] = [];
-    while (
-      i < lines.length &&
-      lines[i].trim() !== "" &&
-      !/^(#{1,6})\s+/.test(lines[i]) &&
-      !/^\s*>/.test(lines[i]) &&
-      !/^\s*[-*+]\s+/.test(lines[i]) &&
-      !/^\s*\d+\.\s+/.test(lines[i]) &&
-      !/^```/.test(lines[i].trim())
-    ) {
-      para.push(lines[i].trim());
-      i += 1;
-    }
-    out.push(`<p>${renderInline(para.join(" "))}</p>`);
-  }
-  closeList();
-  return out.join("\n");
-}
-
-function renderInline(text: string): string {
-  let result = xmlEscape(text);
-  // Inline code first so its content is not touched by other rules.
-  const codeStore: string[] = [];
-  result = result.replace(/`([^`]+)`/g, (_m, code) => {
-    codeStore.push(code);
-    return `\u0000${codeStore.length - 1}\u0000`;
-  });
-  // Images then links.
-  result = result.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_m, alt, src) => `<img src="${src}" alt="${alt}">`);
-  result = result.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, label, href) => `<a href="${href}">${label}</a>`);
-  result = result.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  result = result.replace(/__([^_]+)__/g, "<strong>$1</strong>");
-  result = result.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-  result = result.replace(/_([^_]+)_/g, "<em>$1</em>");
-  result = result.replace(/~~([^~]+)~~/g, "<del>$1</del>");
-  result = result.replace(/\u0000(\d+)\u0000/g, (_m, idx) => `<code>${codeStore[Number(idx)]}</code>`);
-  return result;
+export async function renderMarkdownBody(markdown: string): Promise<string> {
+  // marked ships only as an ES module; this package compiles to CommonJS.
+  const { marked } = await import("marked");
+  const source = markdown.replace(/^\uFEFF/, "");
+  return (marked.parse(source, { async: false, gfm: true }) as string).trim();
 }
 
 // --- BMP encoder ----------------------------------------------------------
@@ -1000,8 +694,11 @@ export function decodeBmp(bytes: Uint8Array): RawImage {
   const rawHeight = view.getInt32(22, true);
   const bpp = view.getUint16(28, true);
   const compression = view.getUint32(30, true);
-  if (compression !== 0) {
-    throw new Error("暂不支持压缩的 BMP");
+  // 0 = BI_RGB, 3 = BI_BITFIELDS, 6 = BI_ALPHABITFIELDS. Masks follow a 40-byte
+  // header, or live inside V4/V5 headers at the same offset.
+  const bitfields = compression === 3 || compression === 6;
+  if (compression !== 0 && !bitfields) {
+    throw new Error("暂不支持压缩的 BMP（RLE/JPEG/PNG）");
   }
   const topDown = rawHeight < 0;
   const height = Math.abs(rawHeight);
@@ -1016,6 +713,30 @@ export function decodeBmp(bytes: Uint8Array): RawImage {
     out[di + 2] = b;
     out[di + 3] = a;
   };
+
+  if (bitfields || bpp === 16) {
+    if (bpp !== 16 && bpp !== 32) throw new Error(`暂不支持 ${bpp} 位位域 BMP`);
+    let masks: [number, number, number, number];
+    if (bitfields) {
+      const alpha = compression === 6 || dibSize >= 56 ? view.getUint32(14 + 52, true) : 0;
+      masks = [view.getUint32(54, true), view.getUint32(58, true), view.getUint32(62, true), alpha];
+    } else {
+      masks = [0x7c00, 0x03e0, 0x001f, 0]; // 16-bit BI_RGB is 5-5-5
+    }
+    const channels = masks.map(maskShape);
+    const rowSize = Math.floor((bpp * width + 31) / 32) * 4;
+    for (let y = 0; y < height; y += 1) {
+      let si = pixelOffset + y * rowSize;
+      for (let x = 0; x < width; x += 1) {
+        const value = bpp === 32 ? view.getUint32(si, true) : view.getUint16(si, true);
+        const [r, g, b, a] = channels.map((shape) => (shape ? shape.read(value) : 255));
+        setPixel(x, y, r, g, b, a);
+        si += bpp / 8;
+      }
+    }
+    if (channels[3] && !hasNonZeroAlpha(out)) forceOpaque(out);
+    return { data: out, width, height };
+  }
 
   if (bpp === 32 || bpp === 24) {
     const bytesPerPixel = bpp / 8;
@@ -1068,6 +789,17 @@ export function decodeBmp(bytes: Uint8Array): RawImage {
   }
 
   throw new Error(`暂不支持 ${bpp} 位 BMP`);
+}
+
+/** Shift/width of a BMP channel mask, scaling the channel to 0-255. */
+function maskShape(mask: number): { read: (value: number) => number } | null {
+  if (!mask) return null;
+  let shift = 0;
+  while (((mask >>> shift) & 1) === 0) shift += 1;
+  let bits = 0;
+  while (((mask >>> (shift + bits)) & 1) === 1 && shift + bits < 32) bits += 1;
+  const max = 2 ** bits - 1;
+  return { read: (value) => Math.round((((value & mask) >>> shift) / max) * 255) };
 }
 
 function hasNonZeroAlpha(rgba: Uint8Array): boolean {

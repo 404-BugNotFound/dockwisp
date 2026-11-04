@@ -20,12 +20,16 @@ Dockwisp 的原创代码按 MIT License 发布（见 `LICENSE`）。以下第三
 | libvips 及其依赖（随 @img/sharp-win32-x64 分发） | Apache-2.0 AND LGPL-3.0-or-later | npm 包内 `LICENSE`；以独立 DLL 动态链接，可自行替换；https://github.com/libvips/libvips |
 | pinyin-pro | MIT | 下方全文；Copyright (c) 2022-present zh-lx |
 | @electron/asar | MIT | 下方全文；Copyright (c) 2014 GitHub Inc. |
+| marked | MIT | npm 包内 `LICENSE.md`；https://github.com/markedjs/marked |
+| yaml | ISC | npm 包内 `LICENSE`；https://github.com/eemeli/yaml |
+| iconv-lite（含 safer-buffer） | MIT | npm 包内 `LICENSE`；https://github.com/pillarjs/iconv-lite |
 
 ## 按需下载的组件
 
 | 组件 | 许可证 | 说明 |
 | --- | --- | --- |
 | LibreOffice | MPL-2.0 | 首次使用文档转换时，经用户确认后从 The Document Foundation 官方站点下载并校验 SHA-256；不随安装包分发。https://www.libreoffice.org/about-us/licenses |
+| PDF 转 Word 组件：CPython 嵌入版 3.14.10、pdf2docx 0.5.13、PyMuPDF 1.28.2、python-docx、lxml、fontTools、NumPy、opencv-python-headless、fire、termcolor、typing_extensions | PSF-2.0；PyMuPDF 为 AGPL-3.0（Artifex 双许可）；pdf2docx 及其余为 MIT / BSD / Apache-2.0 | 首次使用 PDF 转 Word 时，经用户确认后从 python.org 与 PyPI 官方地址下载并逐个校验 SHA-256，解压到用户数据目录，以独立进程调用；不随安装包分发。https://github.com/ArtifexSoftware/pdf2docx 、https://github.com/pymupdf/PyMuPDF |
 
 ## pinyin-pro
 

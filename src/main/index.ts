@@ -1976,8 +1976,11 @@ void app.whenReady().then(async () => {
         for (const target of targets) {
           if (target.available === false && !target.needsDownload) continue;
           const parts: string[] = [];
-          if (target.needsDownload) parts.push("首次使用需下载文档转换组件");
-          if (target.note) parts.push(target.note);
+          if (target.needsDownload) {
+            parts.push(target.component === "pdfword" ? "首次使用需下载 PDF 转换组件" : "首次使用需下载文档转换组件");
+          } else if (target.note) {
+            parts.push(target.note);
+          }
           if (parts.length === 0) {
             parts.push(convertible.length === 1 ? "输出到源文件同目录" : `转换 ${convertible.length} 个文件 · 输出到源文件同目录`);
           }

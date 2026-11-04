@@ -10,10 +10,13 @@ import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   baseName,
   categoryForExtension,
   csvToJson,
+  decodeText,
+  encodeCsvText,
   extensionOf,
   jsonToCsv,
   jsonToXml,
@@ -21,19 +24,23 @@ import {
   listTargetFormats,
   markdownToHtml,
   parseYaml,
+  resolveOutputDir,
   resolveOutputPath,
   stemOf,
   type Capabilities,
   type ConvertCategory,
+  type ConvertComponent,
   type TargetFormat,
 } from "../core/file-convert";
-import { convertImage, imageToPngBuffer } from "./convert-image";
+import { convertImage, imageForPdf, imageToPngBuffer } from "./convert-image";
 import {
   DownloadCancelled,
   LIBREOFFICE,
   LibreOfficeEngine,
   type DownloadProgress,
 } from "./convert-office-engine";
+import { PDF2DOCX, Pdf2DocxEngine } from "./convert-pdf2docx-engine";
+import { recognizeImageLayout } from "./ocr";
 import { SettingsStore } from "./settings";
 
 interface ConvertFile {
@@ -52,6 +59,7 @@ interface ConvertRequest {
   quality?: number;
   icoSizes?: number[];
   outputDir?: string;
+  fitSheets?: boolean;
 }
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -81,11 +89,17 @@ export class ConvertController {
   private files: ConvertFile[] = [];
   private readonly office: LibreOfficeEngine;
   private officeReady = false;
+  private readonly pdfword: Pdf2DocxEngine;
+  private pdfwordReady = false;
   // A preset target to pre-select once the window's files arrive.
   private pendingPreset: { target?: string } | null = null;
 
   constructor(private readonly settings: SettingsStore) {
     this.office = new LibreOfficeEngine(app.getPath("userData"));
+    this.pdfword = new Pdf2DocxEngine(
+      app.getPath("userData"),
+      path.join(__dirname, "convert-pdf2docx.py"),
+    );
     this.registerIpc();
     void this.refreshOfficeReady();
   }
@@ -140,7 +154,7 @@ export class ConvertController {
       if (!match) {
         return { ok: false, outputs, message: `${baseName(filePath)} 不支持转换为 ${targetExt.toUpperCase()}` };
       }
-      if (match.engine === "office" && !this.officeReady) {
+      if (match.component && match.needsDownload) {
         return { ok: false, outputs, needsDownload: true };
       }
     }
@@ -162,14 +176,20 @@ export class ConvertController {
   // --- Capabilities -------------------------------------------------------
 
   private capabilities(): Capabilities {
-    return { office: this.officeReady };
+    return { office: this.officeReady, pdfword: this.pdfwordReady };
   }
 
+  /** Refresh whether each downloadable engine is installed. */
   private async refreshOfficeReady(): Promise<void> {
     try {
       this.officeReady = await this.office.isReady();
     } catch {
       this.officeReady = false;
+    }
+    try {
+      this.pdfwordReady = await this.pdfword.isReady();
+    } catch {
+      this.pdfwordReady = false;
     }
   }
 
@@ -207,6 +227,7 @@ export class ConvertController {
       if (this.window === window) this.window = null;
       this.files = [];
       this.office.cancel();
+      this.pdfword.cancel();
     });
     window.webContents.on("will-navigate", (event) => event.preventDefault());
     window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -232,6 +253,7 @@ export class ConvertController {
       theme: this.theme(),
       capabilities: this.capabilities(),
       office: { version: LIBREOFFICE.version, sizeMb: LIBREOFFICE.approxSizeMb },
+      pdfword: { version: PDF2DOCX.version, sizeMb: PDF2DOCX.approxSizeMb },
     });
   }
 
@@ -338,13 +360,32 @@ export class ConvertController {
       }
     });
 
-    ipcMain.handle("convert:download-office", async (event) => {
+    // Merge the given images (window order) into one PDF next to the first.
+    ipcMain.handle("convert:merge-images-pdf", async (event, ids: unknown, outputDir: unknown) => {
+      if (!this.fromWindow(event) || !Array.isArray(ids)) return { ok: false, message: "参数无效" };
+      const chosen = ids
+        .map((id) => this.files.find((file) => file.id === id))
+        .filter((file): file is ConvertFile => Boolean(file) && file!.category === "image");
+      if (chosen.length < 2) return { ok: false, message: "至少需要两张图片" };
+      const dir = typeof outputDir === "string" && outputDir ? outputDir : path.dirname(chosen[0].path);
+      const output = resolveOutputPath(dir, `${stemOf(chosen[0].path)} 等 ${chosen.length} 张`, "pdf", (c) => existsSync(c));
+      try {
+        await this.imagesToPdf(chosen.map((file) => file.path), output);
+        return { ok: true, outputPath: output };
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : String(error) };
+      }
+    });
+
+    ipcMain.handle("convert:download-office", async (event, component: unknown) => {
       if (!this.fromWindow(event)) return { ok: false };
-      return this.downloadOffice();
+      return this.downloadComponent(component === "pdfword" ? "pdfword" : "office");
     });
 
     ipcMain.on("convert:cancel-download", (event) => {
-      if (this.fromWindow(event)) this.office.cancel();
+      if (!this.fromWindow(event)) return;
+      this.office.cancel();
+      this.pdfword.cancel();
     });
 
     ipcMain.handle("convert:open-file", async (event, filePath: unknown) => {
@@ -388,6 +429,7 @@ export class ConvertController {
     if (typeof value.outputDir === "string" && value.outputDir) {
       request.outputDir = value.outputDir;
     }
+    if (value.fitSheets === true) request.fitSheets = true;
     return request;
   }
 
@@ -408,8 +450,9 @@ export class ConvertController {
       const targets = listTargetFormats(ext, this.capabilities());
       const target = targets.find((item) => item.id === request.targetExt);
       if (!target) throw new Error("不支持的目标格式");
-      if (target.engine === "office" && !this.officeReady) {
-        this.result(request.id, false, undefined, "需先下载文档转换组件", true);
+      if (target.component && target.needsDownload) {
+        const name = target.component === "pdfword" ? "PDF 转换组件" : "文档转换组件";
+        this.result(request.id, false, undefined, `需先下载${name}`, true);
         return;
       }
       const output = await this.convertOne(request.path, request.targetExt, request, (p) =>
@@ -441,7 +484,7 @@ export class ConvertController {
     if (!target) throw new Error("不支持的目标格式");
 
     const dir = request?.outputDir ?? path.dirname(filePath);
-    const output = resolveOutputPath(dir, stemOf(filePath), targetExt, (c) => existsSync(c));
+    let output = resolveOutputPath(dir, stemOf(filePath), targetExt, (c) => existsSync(c));
 
     switch (target.engine) {
       case "image": {
@@ -462,11 +505,31 @@ export class ConvertController {
         onProgress?.(30);
         await this.runPdf(filePath, ext, output, onProgress);
         break;
-      case "office":
+      case "office": {
         if (!this.officeReady) throw new Error("需先下载文档转换组件");
         onProgress?.(20);
-        await this.office.convert(officeCategory(category), filePath, output, targetExt);
+        const outputs = await this.office.convert(officeCategory(category), filePath, output, targetExt, {
+          fitSheets: request?.fitSheets,
+        });
+        if (outputs[0]) output = outputs[0];
         break;
+      }
+      case "pdfword":
+        if (!this.pdfwordReady) throw new Error("需先下载 PDF 转换组件");
+        if (targetExt === "docx") {
+          await this.pdfword.convert(filePath, output, {
+            ocr: async (page) => (await recognizeImageLayout(page.image)).lines,
+            onProgress,
+          });
+          return output;
+        }
+        // PDF -> images: one file per page in a folder named after the PDF.
+        return this.pdfword.renderPages(
+          filePath,
+          resolveOutputDir(dir, stemOf(filePath), (c) => existsSync(c)),
+          targetExt === "jpg" ? "jpg" : "png",
+          onProgress,
+        );
       default:
         throw new Error("未知的转换引擎");
     }
@@ -475,21 +538,27 @@ export class ConvertController {
 
   // --- Data (pure) --------------------------------------------------------
 
+  private async readText(filePath: string): Promise<string> {
+    return decodeText(new Uint8Array(await readFile(filePath)));
+  }
+
   private async runData(filePath: string, ext: string, targetExt: string, output: string): Promise<void> {
-    const text = (await readFile(filePath, "utf8")).replace(/^\uFEFF/, "");
+    const text = await this.readText(filePath);
     let result: string;
     if (ext === "json") {
       const parsed = JSON.parse(text);
       if (targetExt === "yaml") result = jsonToYaml(parsed);
-      else if (targetExt === "csv") result = jsonToCsv(parsed);
-      else if (targetExt === "xml") result = jsonToXml(parsed);
+      else if (targetExt === "csv") {
+        await writeFile(output, encodeCsvText(jsonToCsv(parsed)));
+        return;
+      } else if (targetExt === "xml") result = jsonToXml(parsed);
       else throw new Error("不支持的目标格式");
     } else if (ext === "yaml" || ext === "yml") {
       result = `${JSON.stringify(parseYaml(text), null, 2)}\n`;
     } else if (ext === "csv") {
       result = `${JSON.stringify(csvToJson(text), null, 2)}\n`;
     } else if (ext === "md" || ext === "markdown") {
-      result = markdownToHtml(text, stemOf(filePath));
+      result = await markdownToHtml(text, stemOf(filePath));
     } else {
       throw new Error("不支持的数据转换");
     }
@@ -498,71 +567,122 @@ export class ConvertController {
 
   // --- PDF (hidden window printToPDF) ------------------------------------
 
-  private async runPdf(
-    filePath: string,
-    ext: string,
+  /**
+   * Print an HTML document to PDF on A4. `baseDir` lets relative images and
+   * stylesheets resolve against the source file's folder.
+   */
+  private async printHtmlToPdf(
+    html: string,
     output: string,
+    baseDir: string,
     onProgress?: (percent: number) => void,
+    preferCssPageSize = false,
   ): Promise<void> {
-    const html = await this.buildPdfHtml(filePath, ext);
-    onProgress?.(50);
     const pdfWindow = new BrowserWindow({
       show: false,
       webPreferences: { sandbox: true, contextIsolation: true, javascript: false },
     });
+    pdfWindow.webContents.on("will-navigate", (event) => event.preventDefault());
     try {
-      await pdfWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+      await pdfWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`, {
+        baseURLForDataURL: pathToFileURL(`${baseDir}${path.sep}`).href,
+      });
       onProgress?.(80);
-      const pdf = await pdfWindow.webContents.printToPDF({ printBackground: true });
+      const pdf = await pdfWindow.webContents.printToPDF({
+        printBackground: true,
+        pageSize: "A4",
+        preferCSSPageSize: preferCssPageSize,
+      });
       await writeFile(output, pdf);
     } finally {
       if (!pdfWindow.isDestroyed()) pdfWindow.close();
     }
   }
 
+  private async runPdf(
+    filePath: string,
+    ext: string,
+    output: string,
+    onProgress?: (percent: number) => void,
+  ): Promise<void> {
+    if (categoryForExtension(ext) === "image") {
+      await this.imagesToPdf([filePath], output, onProgress);
+      return;
+    }
+    const html = await this.buildPdfHtml(filePath, ext);
+    onProgress?.(50);
+    await this.printHtmlToPdf(html, output, path.dirname(filePath), onProgress);
+  }
+
+  /** One image per A4 page, centred and scaled to fit; wide images go landscape. */
+  private async imagesToPdf(
+    filePaths: string[],
+    output: string,
+    onProgress?: (percent: number) => void,
+  ): Promise<void> {
+    const pages: string[] = [];
+    for (let i = 0; i < filePaths.length; i += 1) {
+      const stats = await stat(filePaths[i]);
+      if (stats.size > MAX_IMAGE_BYTES) throw new Error(`${baseName(filePaths[i])} 过大（上限 120 MB）`);
+      const image = await imageForPdf(filePaths[i]);
+      const landscape = image.width > image.height;
+      pages.push(
+        `<section class="${landscape ? "land" : "port"}"><img src="${image.dataUrl}"></section>`,
+      );
+      onProgress?.(10 + Math.round(((i + 1) / filePaths.length) * 60));
+    }
+    const html = [
+      "<!doctype html><html><head><meta charset='UTF-8'><style>",
+      "@page{size:A4 portrait;margin:10mm;}",
+      "@page land{size:A4 landscape;margin:10mm;}",
+      "html,body{margin:0;padding:0;}",
+      "section{display:flex;align-items:center;justify-content:center;break-after:page;overflow:hidden;}",
+      "section:last-child{break-after:auto;}",
+      "section.port{width:190mm;height:277mm;}",
+      "section.land{page:land;width:277mm;height:190mm;}",
+      "img{max-width:100%;max-height:100%;object-fit:contain;}",
+      "</style></head><body>",
+      ...pages,
+      "</body></html>",
+    ].join("");
+    await this.printHtmlToPdf(html, output, path.dirname(filePaths[0]), onProgress, true);
+  }
+
   private async buildPdfHtml(filePath: string, ext: string): Promise<string> {
-    if (ext === "html" || ext === "htm") return readFile(filePath, "utf8");
+    if (ext === "html" || ext === "htm") return this.readText(filePath);
     if (ext === "md" || ext === "markdown") {
-      const text = (await readFile(filePath, "utf8")).replace(/^\uFEFF/, "");
-      return markdownToHtml(text, stemOf(filePath));
+      return markdownToHtml(await this.readText(filePath), stemOf(filePath));
     }
     if (ext === "txt") {
-      const text = (await readFile(filePath, "utf8")).replace(/^\uFEFF/, "");
+      const text = await this.readText(filePath);
       const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       return [
         "<!doctype html><html><head><meta charset='UTF-8'><style>",
+        "@page{margin:18mm 16mm;}",
         "body{font-family:'Consolas','Microsoft YaHei',monospace;white-space:pre-wrap;",
-        "word-break:break-word;padding:32px;line-height:1.6;font-size:13px;}",
+        "word-break:break-word;margin:0;line-height:1.6;font-size:12px;}",
         "</style></head><body>",
         escaped,
         "</body></html>",
       ].join("");
     }
-    // Image -> full-page image. Transcode bmp/ico/tiff to png so <img> renders.
-    let dataUrl: string;
-    if (ext === "bmp" || ext === "ico" || ext === "tiff" || ext === "tif") {
-      const png = await imageToPngBuffer(filePath);
-      dataUrl = `data:image/png;base64,${png.toString("base64")}`;
-    } else {
-      const buffer = await readFile(filePath);
-      const mime = MIME_BY_EXT[ext] ?? "application/octet-stream";
-      dataUrl = `data:${mime};base64,${buffer.toString("base64")}`;
-    }
-    return [
-      "<!doctype html><html><head><meta charset='UTF-8'><style>",
-      "@page{margin:0;}html,body{margin:0;padding:0;}img{display:block;max-width:100%;}",
-      "</style></head><body>",
-      `<img src="${dataUrl}">`,
-      "</body></html>",
-    ].join("");
+    throw new Error("不支持转换为 PDF 的文件类型");
   }
 
   // --- Office download flow ----------------------------------------------
 
-  private async downloadOffice(): Promise<{ ok: boolean; message?: string; cancelled?: boolean }> {
+  private async downloadComponent(
+    component: ConvertComponent,
+  ): Promise<{ ok: boolean; message?: string; cancelled?: boolean }> {
     try {
-      await this.office.ensureInstalled((progress) => this.sendDownloadProgress(progress));
-      this.officeReady = true;
+      const onProgress = (progress: DownloadProgress) => this.sendDownloadProgress(progress);
+      if (component === "pdfword") {
+        await this.pdfword.ensureInstalled(onProgress);
+        this.pdfwordReady = true;
+      } else {
+        await this.office.ensureInstalled(onProgress);
+        this.officeReady = true;
+      }
       this.sendState();
       return { ok: true };
     } catch (error) {
@@ -576,18 +696,15 @@ export class ConvertController {
     this.window.webContents.send("convert:download-progress", progress);
   }
 
-  /** When a preset target needs the office engine, tell the window to prompt. */
+  /** When a preset target needs a missing engine, tell the window to prompt. */
   private async maybePromptPreset(targetExt: string): Promise<void> {
     await this.refreshOfficeReady();
-    if (this.officeReady) return;
     const ext = targetExt.toLowerCase();
-    // Does any seeded file's target with this id use the office engine?
-    const needsOffice = this.files.some((file) => {
-      const target = listTargetFormats(file.ext, this.capabilities()).find((t) => t.id === ext);
-      return target?.engine === "office";
-    });
-    if (needsOffice && this.window && !this.window.isDestroyed()) {
-      this.window.webContents.send("convert:prompt-download", { target: ext });
+    const needs = this.files
+      .map((file) => listTargetFormats(file.ext, this.capabilities()).find((t) => t.id === ext))
+      .find((target) => target?.component && target.needsDownload);
+    if (needs && this.window && !this.window.isDestroyed()) {
+      this.window.webContents.send("convert:prompt-download", { target: ext, component: needs.component });
     }
   }
 }

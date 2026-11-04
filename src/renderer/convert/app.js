@@ -18,6 +18,10 @@ const outDirBtn = document.getElementById("outDir");
 const clearOutBtn = document.getElementById("clearOut");
 const convertBtn = document.getElementById("convert");
 const summaryEl = document.getElementById("summary");
+const batchBar = document.getElementById("batchBar");
+const batchTarget = document.getElementById("batchTarget");
+const mergePdfBtn = document.getElementById("mergePdf");
+const batchStatus = document.getElementById("batchStatus");
 const toast = document.getElementById("toast");
 const overlay = document.getElementById("downloadOverlay");
 const dlTitle = document.getElementById("dlTitle");
@@ -29,8 +33,13 @@ const dlCancel = document.getElementById("dlCancel");
 const ICO_SIZES = [16, 32, 48, 256];
 
 let theme = "light";
-let capabilities = { office: false };
-let officeInfo = { version: "", sizeMb: 0 };
+let capabilities = { office: false, pdfword: false };
+const components = {
+  office: { name: "文档转换组件", version: "", sizeMb: 0, intro: "首次转换文档/表格/演示文稿需要下载 LibreOffice" },
+  pdfword: { name: "PDF 转换组件", version: "", sizeMb: 0, intro: "首次把 PDF 转为 Word 或图片需要下载 pdf2docx 及其 Python 运行环境" },
+};
+// The component the download overlay is currently about.
+let activeComponent = "office";
 let files = [];
 let outputDir = null;
 const selection = new Map(); // id -> { targetId, quality, icoSizes:Set, targets:[] }
@@ -85,11 +94,12 @@ function applyTheme(next) {
 }
 
 function renderCaps() {
-  if (capabilities.office) {
-    capsLine.textContent = `文档转换组件已就绪（LibreOffice ${officeInfo.version}）`;
-  } else {
-    capsLine.textContent = "图片转换已内置；文档转换首次使用时需下载组件";
-  }
+  const ready = [];
+  if (capabilities.office) ready.push(`LibreOffice ${components.office.version}`);
+  if (capabilities.pdfword) ready.push(`pdf2docx ${components.pdfword.version}`);
+  capsLine.textContent = ready.length
+    ? `已就绪：${ready.join("、")}`
+    : "图片转换已内置；文档转换首次使用时需下载组件";
 }
 
 // --- File list rendering --------------------------------------------------
@@ -105,7 +115,10 @@ function renderFiles() {
 
   fileListEl.replaceChildren();
   for (const file of files) fileListEl.append(buildCard(file));
+  batchStatus.hidden = true;
+  batchStatus.replaceChildren();
   updateSummary();
+  refreshBatchBar();
 }
 
 function buildCard(file) {
@@ -165,6 +178,7 @@ async function populateControls(file, refs) {
       targetId: first ? first.id : "",
       quality: 0.9,
       icoSizes: new Set([32]),
+      fitSheets: false,
       targets,
     };
     selection.set(file.id, sel);
@@ -174,6 +188,7 @@ async function populateControls(file, refs) {
   }
   drawControls(file, refs, sel);
   updateSummary();
+  refreshBatchBar();
 }
 
 function drawControls(file, refs, sel) {
@@ -229,6 +244,20 @@ function drawControls(file, refs, sel) {
     controls.append(quality);
   }
 
+  if (current && current.fitSheets) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "ico-chip";
+    chip.textContent = "每个工作表缩到一页";
+    chip.title = "宽表格不再被拆成很多页";
+    chip.setAttribute("aria-pressed", sel.fitSheets ? "true" : "false");
+    chip.addEventListener("click", () => {
+      sel.fitSheets = !sel.fitSheets;
+      chip.setAttribute("aria-pressed", sel.fitSheets ? "true" : "false");
+    });
+    controls.append(chip);
+  }
+
   if (current && current.id === "ico") {
     const wrap = document.createElement("div");
     wrap.className = "ico-sizes";
@@ -266,6 +295,130 @@ function drawControls(file, refs, sel) {
 function updateSummary() {
   summaryEl.textContent = files.length ? `${files.length} 个文件` : "";
   convertBtn.disabled = converting || downloading || files.length === 0;
+}
+
+// --- Batch controls --------------------------------------------------------
+
+/** Target formats offered by every file (intersection by id); label from the first file. */
+function sharedTargets() {
+  if (files.length < 2) return [];
+  const sels = files.map((f) => selection.get(f.id));
+  if (sels.some((s) => !s || !Array.isArray(s.targets) || s.targets.length === 0)) return [];
+  const [first, ...rest] = sels;
+  return first.targets.filter((t) =>
+    rest.every((s) => s.targets.some((o) => o.id === t.id)),
+  );
+}
+
+/** All files currently in the list are images. */
+function allImages() {
+  return files.length >= 2 && files.every((f) => f.category === "image");
+}
+
+function refreshBatchBar() {
+  const shared = sharedTargets();
+  const showMerge = allImages();
+  const showBar = shared.length > 0 || showMerge;
+  batchBar.hidden = !showBar;
+  if (!showBar) {
+    batchTarget.hidden = true;
+    mergePdfBtn.hidden = true;
+    return;
+  }
+
+  // "全部转为" select: rebuilt from the current intersection.
+  const batchField = batchTarget.closest(".field");
+  if (shared.length > 0) {
+    batchTarget.hidden = false;
+    if (batchField) batchField.hidden = false;
+    batchTarget.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "选择格式…";
+    placeholder.selected = true;
+    batchTarget.append(placeholder);
+    for (const target of shared) {
+      const option = document.createElement("option");
+      option.value = target.id;
+      option.textContent = target.needsDownload ? `${target.label} （需下载）` : target.label;
+      batchTarget.append(option);
+    }
+    batchTarget.disabled = converting || downloading;
+  } else {
+    batchTarget.hidden = true;
+    if (batchField) batchField.hidden = true;
+  }
+
+  mergePdfBtn.hidden = !showMerge;
+  mergePdfBtn.disabled = converting || downloading;
+}
+
+function applyBatchTarget(targetId) {
+  if (!targetId) return;
+  for (const file of files) {
+    const sel = selection.get(file.id);
+    if (!sel) continue;
+    if (!sel.targets.some((t) => t.id === targetId)) continue;
+    sel.targetId = targetId;
+    const refs = cardEls.get(file.id);
+    if (refs) drawControls(file, refs, sel);
+  }
+  updateSummary();
+}
+
+async function mergeToPdf() {
+  if (converting || downloading) return;
+  if (!allImages()) return;
+  converting = true;
+  updateSummary();
+  mergePdfBtn.disabled = true;
+  const prevLabel = mergePdfBtn.textContent;
+  mergePdfBtn.textContent = "合并中…";
+  try {
+    const result = await api.mergeImagesToPdf(files.map((f) => f.id), outputDir);
+    if (result && result.ok) {
+      const outName = (result.outputPath || "").split(/[\\/]/).pop() || "";
+      showToast(`已合并：${outName}`);
+      showBatchResult(result.outputPath);
+    } else {
+      showToast((result && result.message) || "合并失败");
+    }
+  } catch (error) {
+    showToast(error && error.message ? error.message : String(error));
+  } finally {
+    converting = false;
+    mergePdfBtn.textContent = prevLabel;
+    updateSummary();
+    refreshBatchBar();
+  }
+}
+
+function showBatchResult(outputPath) {
+  batchStatus.replaceChildren();
+  if (!outputPath) {
+    batchStatus.hidden = true;
+    return;
+  }
+  batchStatus.hidden = false;
+  const dot = document.createElement("span");
+  dot.className = "status-dot";
+  const text = document.createElement("span");
+  const outName = outputPath.split(/[\\/]/).pop() || "";
+  text.textContent = `已合并 ${outName}`;
+  const actions = document.createElement("span");
+  actions.className = "result-actions";
+  const open = document.createElement("button");
+  open.className = "link-button";
+  open.type = "button";
+  open.textContent = "打开";
+  open.addEventListener("click", () => api.openFile(outputPath));
+  const reveal = document.createElement("button");
+  reveal.className = "link-button";
+  reveal.type = "button";
+  reveal.textContent = "打开目录";
+  reveal.addEventListener("click", () => api.revealFile(outputPath));
+  actions.append(open, reveal);
+  batchStatus.append(dot, text, actions);
 }
 
 // --- Conversion ------------------------------------------------------------
@@ -314,12 +467,15 @@ function showResult(result) {
     const line = document.createElement("div");
     line.className = "status-line err";
     const text = document.createElement("span");
-    text.textContent = "需下载文档转换组件";
+    text.textContent = result.message || "需下载转换组件";
     const act = document.createElement("button");
     act.className = "link-button";
     act.type = "button";
     act.textContent = "立即下载";
-    act.addEventListener("click", () => openDownloadConfirm(null));
+    act.addEventListener("click", () => {
+      const missing = missingComponents();
+      if (missing.length) openDownloadConfirm(missing[0], null);
+    });
     line.append(text, act);
     refs.status.append(line);
   } else {
@@ -334,21 +490,24 @@ function showResult(result) {
   }
 }
 
-/** True when any selected target needs the office engine. */
-function anySelectedNeedsDownload() {
+/** Components the currently selected targets still need, in order. */
+function missingComponents() {
+  const missing = [];
   for (const file of files) {
     const sel = selection.get(file.id);
     if (!sel) continue;
     const target = sel.targets && sel.targets.find((t) => t.id === sel.targetId);
-    if (target && target.needsDownload) return true;
+    const component = target && target.needsDownload ? target.component || "office" : null;
+    if (component && !missing.includes(component)) missing.push(component);
   }
-  return false;
+  return missing;
 }
 
 async function startConvert() {
   if (converting || downloading) return;
-  if (anySelectedNeedsDownload()) {
-    openDownloadConfirm({ action: "convert" });
+  const missing = missingComponents();
+  if (missing.length) {
+    openDownloadConfirm(missing[0], { action: "convert" });
     return;
   }
   const requests = [];
@@ -360,6 +519,7 @@ async function startConvert() {
     const request = { id: file.id, path: file.path, targetExt: sel.targetId };
     if (target.quality) request.quality = sel.quality;
     if (sel.targetId === "ico") request.icoSizes = [...sel.icoSizes];
+    if (target.fitSheets && sel.fitSheets) request.fitSheets = true;
     if (outputDir) request.outputDir = outputDir;
     requests.push(request);
     setProgress(file.id, 0);
@@ -368,6 +528,7 @@ async function startConvert() {
   converting = true;
   convertBtn.disabled = true;
   convertBtn.textContent = "转换中…";
+  refreshBatchBar();
   try {
     await api.start(requests);
   } catch (error) {
@@ -376,18 +537,22 @@ async function startConvert() {
     converting = false;
     convertBtn.textContent = "开始转换";
     updateSummary();
+    refreshBatchBar();
   }
 }
 
 // --- Office download flow ---------------------------------------------------
 
-function openDownloadConfirm(after) {
+function openDownloadConfirm(component, after) {
+  activeComponent = components[component] ? component : "office";
+  const info = components[activeComponent];
   pendingAfterDownload = after;
   overlay.hidden = false;
   overlay.dataset.mode = "confirm";
-  dlTitle.textContent = "需要下载文档转换组件";
-  const size = officeInfo.sizeMb ? `约 ${officeInfo.sizeMb} MB` : "";
-  dlDetail.textContent = `首次转换文档/表格/演示文稿需要下载 LibreOffice ${officeInfo.version}（${size}），仅需一次。`;
+  dlTitle.textContent = `需要下载${info.name}`;
+  const size = info.sizeMb ? `（约 ${info.sizeMb} MB）` : "";
+  const version = info.version ? ` ${info.version}` : "";
+  dlDetail.textContent = `${info.intro}${activeComponent === "office" ? version : ""}${size}，仅需一次。`;
   dlBar.style.width = "0%";
   dlConfirm.hidden = false;
   dlConfirm.disabled = false;
@@ -401,7 +566,7 @@ function setDownloadPhase(progress) {
   dlCancel.textContent = "取消";
   if (progress.phase === "download") {
     const pct = typeof progress.percent === "number" ? progress.percent : null;
-    dlTitle.textContent = "正在下载文档转换组件…";
+    dlTitle.textContent = `正在下载${components[activeComponent].name}…`;
     if (pct !== null) {
       dlBar.style.width = `${pct}%`;
       const recv = formatBytes(progress.received || 0);
@@ -432,20 +597,24 @@ async function runDownload() {
   dlDetail.textContent = "";
   dlBar.style.width = "0%";
   try {
-    const result = await api.downloadOffice();
+    const result = await api.downloadOffice(activeComponent);
     downloading = false;
     dlBar.classList.remove("indeterminate");
     if (result.ok) {
       overlay.hidden = true;
-      showToast("文档转换组件已就绪");
+      showToast(`${components[activeComponent].name}已就绪`);
       const after = pendingAfterDownload;
       pendingAfterDownload = null;
-      // Refresh target lists now that office is available.
+      // Refresh target lists now that the component is available.
       for (const file of files) {
         const refs = cardEls.get(file.id);
         if (refs) await populateControls(file, refs);
       }
-      if (after && after.action === "convert") void startConvert();
+      if (after && after.action === "convert") {
+        const missing = missingComponents();
+        if (missing.length) openDownloadConfirm(missing[0], after);
+        else void startConvert();
+      }
     } else if (result.cancelled) {
       overlay.hidden = true;
       showToast("已取消下载");
@@ -515,7 +684,7 @@ function setOutputDir(dir) {
 function applyPreset(preset) {
   if (!preset || !preset.target) return;
   const targetId = preset.target.toLowerCase();
-  let needsDownload = false;
+  let missing = null;
   for (const file of files) {
     const sel = selection.get(file.id);
     if (!sel) continue;
@@ -524,18 +693,29 @@ function applyPreset(preset) {
       const refs = cardEls.get(file.id);
       if (refs) drawControls(file, refs, sel);
       const target = sel.targets.find((t) => t.id === targetId);
-      if (target && target.needsDownload) needsDownload = true;
+      if (target && target.needsDownload && !missing) missing = target.component || "office";
     }
   }
   updateSummary();
-  if (needsDownload) openDownloadConfirm({ action: "convert" });
+  if (missing) openDownloadConfirm(missing, { action: "convert" });
 }
 
 // --- Wire up ----------------------------------------------------------------
 
 addFilesBtn.addEventListener("click", () => api.addFiles());
+dropzone.addEventListener("click", () => api.addFiles());
+dropzone.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    api.addFiles();
+  }
+});
 closeBtn.addEventListener("click", () => api.close());
 convertBtn.addEventListener("click", () => void startConvert());
+batchTarget.addEventListener("change", () => {
+  applyBatchTarget(batchTarget.value);
+});
+mergePdfBtn.addEventListener("click", () => void mergeToPdf());
 outDirBtn.addEventListener("click", async () => {
   const dir = await api.chooseOutputDir();
   if (dir) setOutputDir(dir);
@@ -565,8 +745,10 @@ window.addEventListener("keydown", (event) => {
 
 api.onState((state) => {
   applyTheme(state.theme);
-  capabilities = state.capabilities || { office: false };
-  if (state.office) officeInfo = state.office;
+  capabilities = state.capabilities || { office: false, pdfword: false };
+  for (const key of Object.keys(components)) {
+    if (state[key]) Object.assign(components[key], state[key]);
+  }
   renderCaps();
   for (const file of files) {
     const refs = cardEls.get(file.id);
@@ -580,7 +762,7 @@ api.onFiles((next) => {
 api.onProgress((p) => setProgress(p.id, p.percent));
 api.onResult((result) => showResult(result));
 api.onPreset((preset) => applyPreset(preset));
-api.onPromptDownload(() => openDownloadConfirm({ action: "convert" }));
+api.onPromptDownload((info) => openDownloadConfirm((info && info.component) || "office", { action: "convert" }));
 api.onDownloadProgress((progress) => {
   if (!overlay.hidden) setDownloadPhase(progress);
 });

@@ -19,12 +19,20 @@ export interface ImageConvertOptions {
   icoSizes?: number[];
 }
 
+// SVG has no pixel size of its own; rasterise so the longest side reaches at
+// least this many pixels. The density limit only guards against absurd input
+// sizes (e.g. a 1-unit viewBox).
+const SVG_MIN_SIDE = 1_024;
+const SVG_MAX_DENSITY = 72 * 1_024;
+// Formats whose encoders can write every frame of an animated source.
+const ANIMATED_OUTPUTS = new Set(["gif", "webp"]);
+
 /**
  * Build a sharp instance for the source file, decoding bmp/ico ourselves (sharp
- * cannot read them) into raw RGBA first. gif/svg/etc. are handled natively;
- * animated inputs collapse to the first frame (sharp's default).
+ * cannot read them) into raw RGBA first. `animated` keeps every frame of
+ * gif/webp sources; otherwise only the first frame is used.
  */
-async function loadSharp(input: string): Promise<sharp.Sharp> {
+async function loadSharp(input: string, animated = false): Promise<sharp.Sharp> {
   const ext = extensionOf(input);
   if (ext === "bmp") {
     const raw = decodeBmp(new Uint8Array(await readFile(input)));
@@ -42,8 +50,25 @@ async function loadSharp(input: string): Promise<sharp.Sharp> {
   if (!sharpCanDecode(ext)) {
     throw new Error(`sharp 无法解码 .${ext}`);
   }
-  // `animated:false` keeps only the first frame for gif/webp inputs.
-  return sharp(await readFile(input), { animated: false });
+  const buffer = await readFile(input);
+  if (ext === "svg") {
+    return sharp(buffer, { density: await svgDensity(buffer) });
+  }
+  // Photos carry their orientation in EXIF; rotate the pixels so the output
+  // looks the same as in a photo viewer (sharp then drops the tag).
+  return sharp(buffer, { animated }).autoOrient();
+}
+
+/** Density (DPI) that makes the SVG's longest side at least SVG_MIN_SIDE. */
+async function svgDensity(buffer: Buffer): Promise<number> {
+  try {
+    const { width = 0, height = 0 } = await sharp(buffer).metadata();
+    const longest = Math.max(width, height);
+    if (longest <= 0 || longest >= SVG_MIN_SIDE) return 72;
+    return Math.min(SVG_MAX_DENSITY, Math.ceil((72 * SVG_MIN_SIDE) / longest));
+  } catch {
+    return 72;
+  }
 }
 
 function sharpFromRaw(raw: RawImage): sharp.Sharp {
@@ -61,7 +86,7 @@ function qualityPercent(quality: number | undefined, fallback: number): number {
 /**
  * Convert an image file to `output` in `targetExt`. png/jpg/webp/avif/tiff/gif
  * go through sharp's encoders; bmp and ico are produced with our own encoders
- * fed by sharp's raw/png output.
+ * fed by sharp's raw/png output. gif <-> webp keeps every animation frame.
  */
 export async function convertImage(
   input: string,
@@ -70,7 +95,7 @@ export async function convertImage(
   options: ImageConvertOptions = {},
 ): Promise<void> {
   const ext = targetExt.toLowerCase();
-  const image = await loadSharp(input);
+  const image = await loadSharp(input, ANIMATED_OUTPUTS.has(ext));
 
   if (ext === "bmp") {
     const { data, info } = await image
@@ -111,7 +136,7 @@ export async function convertImage(
       // JPEG has no alpha; flatten onto white.
       pipeline = pipeline
         .flatten({ background: "#ffffff" })
-        .jpeg({ quality: qualityPercent(options.quality, 90) });
+        .jpeg({ quality: qualityPercent(options.quality, 90), mozjpeg: true });
       break;
     case "webp":
       pipeline = pipeline.webp({ quality: qualityPercent(options.quality, 90) });
@@ -121,7 +146,7 @@ export async function convertImage(
       break;
     case "tiff":
     case "tif":
-      pipeline = pipeline.tiff();
+      pipeline = pipeline.tiff({ compression: "lzw" });
       break;
     case "gif":
       pipeline = pipeline.gif();
@@ -132,8 +157,33 @@ export async function convertImage(
   await pipeline.toFile(output);
 }
 
-/** Decode any supported image to a PNG data URL (for the UI preview/pdf). */
+/** Decode any supported image to PNG bytes (UI preview, PDF pages). */
 export async function imageToPngBuffer(input: string): Promise<Buffer> {
   const image = await loadSharp(input);
   return image.png().toBuffer();
+}
+
+/** One image ready to place on a PDF page: encoded bytes plus pixel size. */
+export interface PdfPageImage {
+  dataUrl: string;
+  width: number;
+  height: number;
+}
+
+/**
+ * Prepare an image for a PDF page: EXIF-rotated, first frame only, encoded as
+ * JPEG when opaque (smaller PDFs) and PNG when it has transparency.
+ */
+export async function imageForPdf(input: string): Promise<PdfPageImage> {
+  const png = await (await loadSharp(input)).png().toBuffer({ resolveWithObject: true });
+  const { isOpaque } = await sharp(png.data).stats();
+  const encoded = isOpaque
+    ? await sharp(png.data).jpeg({ quality: 92, mozjpeg: true }).toBuffer()
+    : png.data;
+  const mime = isOpaque ? "image/jpeg" : "image/png";
+  return {
+    dataUrl: `data:${mime};base64,${encoded.toString("base64")}`,
+    width: png.info.width,
+    height: png.info.height,
+  };
 }

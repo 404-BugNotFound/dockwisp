@@ -4,3 +4,4 @@ await mkdir("dist/renderer", { recursive: true });
 await cp("src/renderer", "dist/renderer", { recursive: true });
 await mkdir("dist/main", { recursive: true });
 await copyFile("src/main/ocr-warmup.png", "dist/main/ocr-warmup.png");
+await copyFile("src/main/convert-pdf2docx.py", "dist/main/convert-pdf2docx.py");

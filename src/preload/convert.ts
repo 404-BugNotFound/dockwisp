@@ -16,14 +16,17 @@ interface TargetFormat {
   engine: string;
   available: boolean;
   needsDownload?: boolean;
+  component?: "office" | "pdfword";
   note?: string;
   quality?: boolean;
+  fitSheets?: boolean;
 }
 
 interface ConvertState {
   theme: "light" | "dark";
-  capabilities: { office: boolean };
+  capabilities: { office: boolean; pdfword: boolean };
   office: { version: string; sizeMb: number };
+  pdfword: { version: string; sizeMb: number };
 }
 
 interface ConvertRequest {
@@ -33,6 +36,7 @@ interface ConvertRequest {
   quality?: number;
   icoSizes?: number[];
   outputDir?: string;
+  fitSheets?: boolean;
 }
 
 interface ConvertProgress {
@@ -66,7 +70,7 @@ contextBridge.exposeInMainWorld("convert", {
     ipcRenderer.on("convert:result", (_event, result: ConvertResult) => callback(result)),
   onPreset: (callback: (preset: { target?: string }) => void) =>
     ipcRenderer.on("convert:preset", (_event, preset) => callback(preset)),
-  onPromptDownload: (callback: (info: { target: string }) => void) =>
+  onPromptDownload: (callback: (info: { target: string; component?: string }) => void) =>
     ipcRenderer.on("convert:prompt-download", (_event, info) => callback(info)),
   onDownloadProgress: (callback: (progress: DownloadProgress) => void) =>
     ipcRenderer.on("convert:download-progress", (_event, progress: DownloadProgress) =>
@@ -87,8 +91,15 @@ contextBridge.exposeInMainWorld("convert", {
     ipcRenderer.invoke("convert:read-source", filePath),
   start: (requests: ConvertRequest[]): Promise<void> =>
     ipcRenderer.invoke("convert:start", requests),
-  downloadOffice: (): Promise<{ ok: boolean; message?: string; cancelled?: boolean }> =>
-    ipcRenderer.invoke("convert:download-office"),
+  mergeImagesToPdf: (
+    ids: string[],
+    outputDir: string | null,
+  ): Promise<{ ok: boolean; outputPath?: string; message?: string }> =>
+    ipcRenderer.invoke("convert:merge-images-pdf", ids, outputDir),
+  downloadOffice: (
+    component: "office" | "pdfword" = "office",
+  ): Promise<{ ok: boolean; message?: string; cancelled?: boolean }> =>
+    ipcRenderer.invoke("convert:download-office", component),
   cancelDownload: (): void => ipcRenderer.send("convert:cancel-download"),
   openFile: (filePath: string): Promise<{ ok: boolean; message?: string }> =>
     ipcRenderer.invoke("convert:open-file", filePath),

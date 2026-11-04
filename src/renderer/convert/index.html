@@ -31,7 +31,7 @@
     </header>
 
     <main id="stage" class="stage">
-      <section id="dropzone" class="dropzone">
+      <section id="dropzone" class="dropzone" role="button" tabindex="0" title="点击选择文件">
         <div class="drop-inner">
           <span class="drop-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24"><path d="M12 16V4M12 4l-4 4M12 4l4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
@@ -40,6 +40,17 @@
           <div class="drop-sub">图片（PNG / JPG / WebP / AVIF / TIFF / GIF / BMP / ICO / SVG）、文档（Word / Excel / PPT / PDF / ODF）、JSON / YAML / CSV / Markdown</div>
         </div>
       </section>
+
+      <div id="batchBar" class="batch-bar" hidden>
+        <div class="batch-row">
+          <label class="field">
+            <span class="field-label">全部转为</span>
+            <select id="batchTarget" class="select"></select>
+          </label>
+          <button id="mergePdf" class="soft-button" type="button" hidden>合并为一个 PDF</button>
+        </div>
+        <div id="batchStatus" class="batch-status" hidden></div>
+      </div>
 
       <ul id="fileList" class="file-list" hidden></ul>
     </main>

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, existsSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -13,7 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { stemOf } from "../core/file-convert";
+import { resolveOutputPath, stemOf } from "../core/file-convert";
 
 /**
  * Pinned LibreOffice build. Downloaded on first use from the Document
@@ -212,50 +212,57 @@ export class LibreOfficeEngine {
   }
 
   /**
-   * The LibreOffice `--convert-to` filter plus an optional `--infilter`. pdf ->
-   * docx must force the Writer PDF import filter on the input side, otherwise
-   * LibreOffice opens the PDF in Draw and cannot save as a Word document.
+   * The LibreOffice `--convert-to` filter string. PDF -> Word is handled by
+   * the pdf2docx engine, not here.
+   *  - txt / csv: explicit UTF-8 (token 76); csv also writes every sheet as
+   *    "<stem>-<sheet>.csv" (token 12 = -1), comma separated, "-quoted.
+   *  - html: images embedded as data URIs so the single file is complete.
+   *  - spreadsheet pdf with `fitSheets`: each sheet scaled onto one page.
    */
   private filterFor(
     category: "document" | "spreadsheet" | "presentation",
-    sourceExt: string,
     targetExt: string,
-  ): { convertTo: string; inFilter?: string } {
+    options: OfficeConvertOptions,
+  ): string {
     const ext = targetExt.toLowerCase();
-    if (sourceExt === "pdf" && ext === "docx") {
-      return { convertTo: "docx:MS Word 2007 XML", inFilter: "writer_pdf_import" };
+    if (ext === "pdf") {
+      if (category === "spreadsheet" && options.fitSheets) {
+        return 'pdf:calc_pdf_Export:{"SinglePageSheets":{"type":"boolean","value":"true"}}';
+      }
+      return "pdf";
     }
-    if (ext === "pdf") return { convertTo: "pdf" };
     if (category === "document") {
-      if (ext === "docx") return { convertTo: "docx:MS Word 2007 XML" };
-      if (ext === "odt") return { convertTo: "odt" };
-      if (ext === "txt") return { convertTo: "txt:Text" };
-      if (ext === "html") return { convertTo: "html:HTML (StarWriter)" };
+      if (ext === "docx") return "docx:MS Word 2007 XML";
+      if (ext === "odt") return "odt";
+      if (ext === "txt") return "txt:Text (encoded):UTF8,CRLF,,,";
+      if (ext === "html") return "html:XHTML Writer File:UTF8";
     }
     if (category === "spreadsheet") {
-      if (ext === "xlsx") return { convertTo: "xlsx:Calc MS Excel 2007 XML" };
-      if (ext === "ods") return { convertTo: "ods" };
-      if (ext === "csv") return { convertTo: "csv:Text - txt - csv (StarCalc)" };
+      if (ext === "xlsx") return "xlsx:Calc MS Excel 2007 XML";
+      if (ext === "ods") return "ods";
+      if (ext === "csv") return "csv:Text - txt - csv (StarCalc):44,34,76,1,,0,false,true,false,false,false,-1";
     }
     if (category === "presentation") {
-      if (ext === "pptx") return { convertTo: "pptx:Impress MS PowerPoint 2007 XML" };
-      if (ext === "odp") return { convertTo: "odp" };
+      if (ext === "pptx") return "pptx:Impress MS PowerPoint 2007 XML";
+      if (ext === "odp") return "odp";
     }
-    return { convertTo: ext };
+    return ext;
   }
 
   /**
    * Convert `input` to `output` (serialised). `--convert-to` writes into an
    * output dir using the source stem, so we convert into a temp dir then move
-   * the produced file to the requested path.
+   * the produced file(s) next to `output`. A multi-sheet CSV export yields one
+   * file per sheet ("<output stem>-<sheet>.csv"); all paths are returned.
    */
   convert(
     category: "document" | "spreadsheet" | "presentation",
     input: string,
     output: string,
     targetExt: string,
-  ): Promise<void> {
-    const task = this.queue.then(() => this.runConvert(category, input, output, targetExt));
+    options: OfficeConvertOptions = {},
+  ): Promise<string[]> {
+    const task = this.queue.then(() => this.runConvert(category, input, output, targetExt, options));
     // Keep the chain alive even if a task rejects.
     this.queue = task.catch(() => undefined);
     return task;
@@ -266,7 +273,8 @@ export class LibreOfficeEngine {
     input: string,
     output: string,
     targetExt: string,
-  ): Promise<void> {
+    options: OfficeConvertOptions,
+  ): Promise<string[]> {
     if (!this.sofficePath && !(await this.isReady())) {
       throw new Error("文档转换组件尚未下载");
     }
@@ -274,38 +282,54 @@ export class LibreOfficeEngine {
     if (!soffice) throw new Error("未找到 soffice.exe");
     await mkdir(this.profileDir, { recursive: true });
     const workDir = await mkdtemp(path.join(tmpdir(), "dockwisp-lo-"));
-    const sourceExt = stemExt(input);
     try {
-      const filter = this.filterFor(category, sourceExt, targetExt);
       const args = [
         "--headless",
         "--norestore",
         "--nolockcheck",
         "--nologo",
         `-env:UserInstallation=${pathToFileUrl(this.profileDir)}`,
+        "--convert-to",
+        this.filterFor(category, targetExt, options),
+        "--outdir",
+        workDir,
+        input,
       ];
-      if (filter.inFilter) args.push("--infilter=" + filter.inFilter);
-      args.push("--convert-to", filter.convertTo, "--outdir", workDir, input);
       // Run from soffice's own program directory so its bundled Python can
-      // locate its libraries (the PDF import filter needs this).
+      // locate its libraries.
       const result = await runProcess(soffice, args, 180_000, path.dirname(soffice));
       if (result.code !== 0) {
         const tail = (result.stderr || result.stdout).trim().split("\n").slice(-3).join(" ");
         throw new Error(`LibreOffice 转换失败：${tail || result.code}`);
       }
-      const produced = await findProduced(workDir, stemOf(input), targetExt);
-      if (!produced) throw new Error("LibreOffice 未生成输出文件");
-      await moveFile(produced, output);
+      const produced = await findProduced(workDir, targetExt);
+      if (produced.length === 0) throw new Error("LibreOffice 未生成输出文件");
+      if (produced.length === 1) {
+        await moveFile(produced[0], output);
+        return [output];
+      }
+      // Several sheets: keep LibreOffice's "-<sheet>" suffix on our stem.
+      const sourceStem = stemOf(input);
+      const outStem = stemOf(output);
+      const outDir = path.dirname(output);
+      const moved: string[] = [];
+      for (const file of produced) {
+        const name = path.basename(file);
+        const suffix = name.slice(sourceStem.length, name.length - targetExt.length - 1);
+        const target = resolveOutputPath(outDir, `${outStem}${suffix}`, targetExt, (c) => existsSync(c));
+        await moveFile(file, target);
+        moved.push(target);
+      }
+      return moved;
     } finally {
       await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 }
 
-function stemExt(filePath: string): string {
-  const base = filePath.replace(/[\\/]+$/, "");
-  const dot = base.lastIndexOf(".");
-  return dot < 0 ? "" : base.slice(dot + 1).toLowerCase();
+export interface OfficeConvertOptions {
+  /** Spreadsheet -> PDF: scale each sheet onto a single page. */
+  fitSheets?: boolean;
 }
 
 function pathToFileUrl(dir: string): string {
@@ -313,7 +337,7 @@ function pathToFileUrl(dir: string): string {
   return `file:///${normalized.replace(/^\/+/, "")}`;
 }
 
-async function moveFile(from: string, to: string): Promise<void> {
+export async function moveFile(from: string, to: string): Promise<void> {
   try {
     await rename(from, to);
   } catch {
@@ -323,13 +347,14 @@ async function moveFile(from: string, to: string): Promise<void> {
   }
 }
 
-async function findProduced(dir: string, stem: string, targetExt: string): Promise<string | null> {
-  const ext = targetExt.toLowerCase();
+/** Every file LibreOffice wrote with the target extension, sorted by name. */
+async function findProduced(dir: string, targetExt: string): Promise<string[]> {
+  const ext = `.${targetExt.toLowerCase()}`;
   const entries = await readdir(dir).catch(() => [] as string[]);
-  const exact = entries.find((name) => name.toLowerCase() === `${stem.toLowerCase()}.${ext}`);
-  if (exact) return path.join(dir, exact);
-  const anyWithExt = entries.find((name) => name.toLowerCase().endsWith(`.${ext}`));
-  return anyWithExt ? path.join(dir, anyWithExt) : null;
+  return entries
+    .filter((name) => name.toLowerCase().endsWith(ext))
+    .sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }))
+    .map((name) => path.join(dir, name));
 }
 
 /** Shallow recursive search for a file by name, bounded in depth. */
@@ -354,28 +379,29 @@ async function findFile(dir: string, name: string, depth: number): Promise<strin
   return null;
 }
 
-function writeChunk(stream: ReturnType<typeof createWriteStream>, chunk: Uint8Array): Promise<void> {
+export function writeChunk(stream: ReturnType<typeof createWriteStream>, chunk: Uint8Array): Promise<void> {
   return new Promise((resolve, reject) => {
     stream.write(chunk, (error) => (error ? reject(error) : resolve()));
   });
 }
 
-interface ProcessResult {
+export interface ProcessResult {
   code: number | null;
   stdout: string;
   stderr: string;
 }
 
-function runProcess(
+export function runProcess(
   command: string,
   args: string[],
   timeoutMs: number,
   cwd?: string,
+  options: { env?: NodeJS.ProcessEnv; onStdout?: (chunk: string) => void } = {},
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawn(command, args, { windowsHide: true, cwd });
+      child = spawn(command, args, { windowsHide: true, cwd, env: options.env });
     } catch (error) {
       reject(error instanceof Error ? error : new Error(String(error)));
       return;
@@ -383,7 +409,11 @@ function runProcess(
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => child.kill(), timeoutMs);
-    child.stdout?.on("data", (chunk) => (stdout += chunk.toString()));
+    child.stdout?.on("data", (chunk) => {
+      const text = chunk.toString();
+      stdout += text;
+      options.onStdout?.(text);
+    });
     child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
     child.on("error", (error) => {
       clearTimeout(timer);
