@@ -25,6 +25,8 @@ export interface AppSettings {
   launcherPosition: { x: number; y: number } | null;
   windowDragEnabled: boolean;
   panelTransparency: number;
+  /** Where files sent from a phone are saved; empty means Downloads\Dockwisp. */
+  lanReceiveDirectory: string;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -46,6 +48,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   launcherPosition: null,
   windowDragEnabled: true,
   panelTransparency: 12,
+  lanReceiveDirectory: "",
 };
 
 const THEME_VALUES = new Set<ThemePreference>(["system", "light", "dark"]);
@@ -148,6 +151,8 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
       typeof value.panelTransparency === "number" && Number.isFinite(value.panelTransparency)
         ? Math.min(40, Math.max(0, Math.round(value.panelTransparency)))
         : DEFAULT_SETTINGS.panelTransparency,
+    lanReceiveDirectory:
+      typeof value.lanReceiveDirectory === "string" ? value.lanReceiveDirectory.trim() : "",
   };
 }
 

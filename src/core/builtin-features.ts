@@ -61,6 +61,11 @@ export const BUILTIN_FEATURES: BuiltinFeature[] = [
     title: "翻译",
     keywords: ["翻译", "文本翻译", "translate", "translation"],
   },
+  {
+    id: "builtin:lan-transfer",
+    title: "局域网互传",
+    keywords: ["互传", "传文件", "文件互传", "手机传输", "发送到手机", "手机", "lan", "transfer", "airdrop"],
+  },
 ];
 
 /** Precompute the search forms for every title + keyword once at load time. */

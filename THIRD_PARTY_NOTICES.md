@@ -23,6 +23,7 @@ Dockwisp 的原创代码按 MIT License 发布（见 `LICENSE`）。以下第三
 | marked | MIT | npm 包内 `LICENSE.md`；https://github.com/markedjs/marked |
 | yaml | ISC | npm 包内 `LICENSE`；https://github.com/eemeli/yaml |
 | iconv-lite（含 safer-buffer） | MIT | npm 包内 `LICENSE`；https://github.com/pillarjs/iconv-lite |
+| qrcode（含 dijkstrajs、pngjs 等依赖） | MIT | npm 包内 `license`；Copyright (c) 2012 Ryan Day；https://github.com/soldair/node-qrcode |
 
 ## 按需下载的组件
 

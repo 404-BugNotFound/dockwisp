@@ -168,7 +168,8 @@ export interface BuiltinMatch {
     | "diff"
     | "convert"
     | "translate-window"
-    | "convert-to";
+    | "convert-to"
+    | "lan-transfer";
   title: string;
   subtitle: string;
   score: number;

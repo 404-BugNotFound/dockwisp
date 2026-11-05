@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>局域网互传</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><rect x="4" y="3" width="10" height="18" rx="2"/><path d="M8 18h2"/><path d="M15 8h4a1 1 0 0 1 1 1v3"/><path d="M20 12l-2-2M20 12l2-2"/></svg>
+        </span>
+        <div class="brand-text">
+          <div class="brand-title">局域网互传</div>
+          <div class="brand-sub">手机扫码，与电脑互传文件，无需数据线</div>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="closeWindow" class="icon-button" type="button" aria-label="关闭" title="关闭 (Esc)">
+          <svg viewBox="0 0 24 24"><path d="M6 6 L18 18 M18 6 L6 18"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="split">
+      <!-- Left: connection -->
+      <aside class="conn">
+        <div id="connLive" class="conn-live" hidden>
+          <div class="qr-wrap">
+            <img id="qrImage" class="qr-image" alt="扫码二维码" hidden />
+            <div id="qrEmpty" class="qr-empty">正在生成二维码…</div>
+          </div>
+
+          <div class="url-row">
+            <input id="urlField" class="url-field" type="text" readonly aria-label="访问地址" />
+            <button id="copyUrl" class="icon-button" type="button" aria-label="复制地址" title="复制地址">
+              <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg>
+            </button>
+          </div>
+
+          <label id="adapterField" class="field adapter" hidden>
+            <span class="field-label">网络</span>
+            <select id="adapterSelect" class="select"></select>
+          </label>
+
+          <div id="connStatus" class="conn-status">
+            <span class="status-dot"></span>
+            <span id="connStatusText">等待手机扫码</span>
+          </div>
+
+          <p class="conn-hint">
+            手机与电脑需在同一 Wi-Fi；首次使用请在 Windows 防火墙弹窗中允许“专用网络”。
+          </p>
+        </div>
+
+        <div id="connDown" class="conn-down" hidden>
+          <div class="down-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>
+          </div>
+          <div id="connMessage" class="down-message">传输服务未运行</div>
+          <button id="restartBtn" class="soft-button primary" type="button">重新启动服务</button>
+        </div>
+      </aside>
+
+      <!-- Right: files -->
+      <section class="work">
+        <!-- Send -->
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">发送到手机</span>
+            <div class="panel-tools">
+              <button id="clearSend" class="soft-button" type="button" hidden>清空</button>
+              <button id="addFiles" class="soft-button primary" type="button">添加文件</button>
+            </div>
+          </div>
+          <ul id="sendList" class="row-list" hidden></ul>
+          <div id="sendEmpty" class="empty is-clickable" role="button" tabindex="0" title="点击选择文件">
+            <div class="empty-title">拖入文件，或点击此处添加</div>
+            <div class="empty-sub">这里的文件会出现在手机上，可直接下载</div>
+          </div>
+        </div>
+
+        <!-- Received -->
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">已接收</span>
+            <div class="panel-tools dir-tools">
+              <span id="receiveDir" class="dir-chip" title="接收文件的保存位置"></span>
+              <button id="changeDir" class="soft-button" type="button">更改位置</button>
+              <button id="openDir" class="soft-button" type="button">打开文件夹</button>
+            </div>
+          </div>
+          <ul id="recvList" class="row-list" hidden></ul>
+          <div id="recvEmpty" class="empty">
+            <div class="empty-title">还没有收到文件</div>
+            <div class="empty-sub">手机上传的文件会显示在这里</div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Active transfers -->
+    <footer id="progressDock" class="progress-dock" hidden>
+      <ul id="progressList" class="progress-list"></ul>
+    </footer>
+
+    <!-- Drop veil -->
+    <div id="dropVeil" class="drop-veil" hidden>
+      <div class="drop-veil-card">
+        <span class="drop-veil-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 16V4M12 4l-4 4M12 4l4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        </span>
+        <span class="drop-veil-text">松开以发送到手机</span>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" hidden></div>
+  </body>
+</html>

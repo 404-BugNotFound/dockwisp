@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Dockwisp 互传</title>
+    <style>
+      :root {
+        --bg: #f3f4f8;
+        --panel: #ffffff;
+        --panel-2: #f1f2f6;
+        --panel-3: #e9ebf1;
+        --text: #1d1f27;
+        --muted: #5b606c;
+        --line: rgba(29, 31, 39, 0.1);
+        --accent: #4f46e5;
+        --accent-soft: rgba(79, 70, 229, 0.12);
+        --accent-text: #ffffff;
+        --ok: #16a34a;
+        --err: #dc2626;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1b1c23;
+          --panel: #24252d;
+          --panel-2: #2c2d36;
+          --panel-3: #33343f;
+          --text: #f1f2f6;
+          --muted: #b1b5c1;
+          --line: rgba(255, 255, 255, 0.11);
+          --accent: #8b85f5;
+          --accent-soft: rgba(139, 133, 245, 0.18);
+          --accent-text: #12131a;
+          --ok: #4ade80;
+          --err: #f87171;
+        }
+      }
+
+      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+      [hidden] { display: none !important; }
+
+      html, body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+        font-size: 16px;
+        -webkit-text-size-adjust: 100%;
+      }
+      body {
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 16px 16px calc(24px + env(safe-area-inset-bottom));
+      }
+
+      .app-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 2px 14px;
+      }
+      .app-mark {
+        width: 34px; height: 34px;
+        flex: 0 0 auto;
+        display: grid; place-items: center;
+        border-radius: 10px;
+        background: var(--accent-soft);
+        color: var(--accent);
+      }
+      .app-mark svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+      .app-title { font-size: 18px; font-weight: 700; }
+      .app-sub { font-size: 12px; color: var(--muted); margin-top: 1px; }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 14px;
+        margin-bottom: 16px;
+      }
+      .card-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+      .card-title { font-size: 15px; font-weight: 700; }
+      .card-sub { font-size: 12.5px; color: var(--muted); }
+
+      .banner {
+        margin-bottom: 16px;
+        padding: 12px 14px;
+        border-radius: 14px;
+        background: color-mix(in srgb, var(--err) 14%, var(--panel));
+        border: 1px solid color-mix(in srgb, var(--err) 40%, transparent);
+        color: var(--err);
+        font-size: 13.5px;
+        font-weight: 600;
+        text-align: center;
+      }
+
+      .btn {
+        appearance: none;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 12px 16px;
+        background: var(--panel-2);
+        color: var(--text);
+        font-size: 15px;
+        font-weight: 640;
+        cursor: pointer;
+        min-height: 48px;
+      }
+      .btn:active { transform: translateY(1px); }
+      .btn.primary {
+        border-color: transparent;
+        background: var(--accent);
+        color: var(--accent-text);
+      }
+      .btn.block { display: block; width: 100%; }
+      .btn.sm { padding: 8px 14px; font-size: 13.5px; min-height: 40px; }
+      .btn:disabled { opacity: 0.5; }
+
+      .toolbar {
+        display: flex;
+        gap: 10px;
+        margin-top: 12px;
+        flex-wrap: wrap;
+      }
+      .toolbar .btn { flex: 1 1 auto; }
+
+      .select-all {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .check {
+        width: 22px; height: 22px;
+        flex: 0 0 auto;
+        accent-color: var(--accent);
+        cursor: pointer;
+      }
+
+      .file-list { list-style: none; margin: 0; padding: 0; }
+      .file-item {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 2px;
+        border-top: 1px solid var(--line);
+      }
+      .file-item:first-child { border-top: 0; }
+      .file-text { flex: 1 1 auto; min-width: 0; }
+      .file-name { font-size: 14.5px; font-weight: 600; word-break: break-all; }
+      .file-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+      .empty {
+        padding: 22px 8px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 13.5px;
+      }
+
+      .up-item {
+        padding: 12px 2px;
+        border-top: 1px solid var(--line);
+      }
+      .up-item:first-child { border-top: 0; }
+      .up-top {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .up-name { flex: 1 1 auto; min-width: 0; font-size: 14px; font-weight: 600; word-break: break-all; }
+      .up-state { flex: 0 0 auto; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+      .up-item.ok .up-state { color: var(--ok); }
+      .up-item.err .up-state { color: var(--err); }
+      .up-track {
+        position: relative;
+        height: 6px;
+        margin-top: 8px;
+        border-radius: 999px;
+        background: var(--panel-3);
+        overflow: hidden;
+      }
+      .up-bar {
+        position: absolute;
+        inset: 0;
+        width: 0%;
+        border-radius: 999px;
+        background: var(--accent);
+        transition: width 160ms ease;
+      }
+      .up-item.ok .up-bar { background: var(--ok); }
+      .up-item.err .up-bar { background: var(--err); }
+      .up-retry { margin-top: 8px; }
+
+      .hidden-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+      .toast {
+        position: fixed;
+        left: 50%;
+        bottom: calc(24px + env(safe-area-inset-bottom));
+        transform: translateX(-50%);
+        padding: 10px 18px;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--text) 92%, transparent);
+        color: var(--panel);
+        font-size: 13px;
+        z-index: 40;
+        max-width: 90vw;
+        text-align: center;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+      }
+      .toast[hidden] { display: none; }
+    </style>
+  </head>
+  <body>
+    <header class="app-head">
+      <span class="app-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><rect x="4" y="3" width="10" height="18" rx="2"/><path d="M8 18h2"/><path d="M15 8h4a1 1 0 0 1 1 1v3"/><path d="M20 12l-2-2M20 12l2-2"/></svg>
+      </span>
+      <div>
+        <div class="app-title">Dockwisp 互传</div>
+        <div class="app-sub">与电脑互传文件</div>
+      </div>
+    </header>
+
+    <div id="expired" class="banner" hidden>链接已失效，请在电脑上重新扫码</div>
+
+    <!-- Receive from PC -->
+    <section class="card">
+      <div class="card-head">
+        <span class="card-title">从电脑接收</span>
+        <span id="recvSummary" class="card-sub"></span>
+      </div>
+
+      <label class="select-all" id="selectAllWrap" hidden>
+        <input type="checkbox" id="selectAll" class="check" />
+        <span>全选</span>
+      </label>
+
+      <ul id="recvList" class="file-list"></ul>
+      <div id="recvEmpty" class="empty">电脑上还没有共享文件</div>
+
+      <div class="toolbar" id="recvTools" hidden>
+        <button id="downloadZip" class="btn primary" type="button">全部打包下载</button>
+      </div>
+    </section>
+
+    <!-- Send to PC -->
+    <section class="card">
+      <div class="card-head">
+        <span class="card-title">发送到电脑</span>
+      </div>
+      <button id="pickBtn" class="btn primary block" type="button">选择文件上传</button>
+      <input id="fileInput" class="hidden-input" type="file" multiple />
+      <ul id="upList" class="file-list" style="margin-top: 4px;"></ul>
+    </section>
+
+    <div id="toast" class="toast" hidden></div>
+
+    <script>
+      "use strict";
+
+      var TOKEN = new URLSearchParams(location.search).get("t") || "";
+
+      var recvListEl = document.getElementById("recvList");
+      var recvEmptyEl = document.getElementById("recvEmpty");
+      var recvSummaryEl = document.getElementById("recvSummary");
+      var recvToolsEl = document.getElementById("recvTools");
+      var selectAllWrap = document.getElementById("selectAllWrap");
+      var selectAllEl = document.getElementById("selectAll");
+      var downloadZipBtn = document.getElementById("downloadZip");
+      var expiredEl = document.getElementById("expired");
+
+      var pickBtn = document.getElementById("pickBtn");
+      var fileInput = document.getElementById("fileInput");
+      var upListEl = document.getElementById("upList");
+      var toastEl = document.getElementById("toast");
+
+      var files = [];
+      var selected = Object.create(null); // id -> true
+      var toastTimer = null;
+      var pollTimer = null;
+      var expired = false;
+
+      function showToast(message) {
+        toastEl.hidden = false;
+        toastEl.textContent = message;
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () {
+          toastEl.hidden = true;
+        }, 2400);
+      }
+
+      function formatBytes(bytes) {
+        if (typeof bytes !== "number" || !isFinite(bytes) || bytes < 0) return "";
+        if (bytes < 1024) return bytes + " B";
+        var units = ["KB", "MB", "GB", "TB"];
+        var value = bytes / 1024;
+        var i = 0;
+        while (value >= 1024 && i < units.length - 1) {
+          value /= 1024;
+          i += 1;
+        }
+        return (value >= 10 ? value.toFixed(0) : value.toFixed(1)) + " " + units[i];
+      }
+
+      function withToken(path, extra) {
+        var sep = path.indexOf("?") >= 0 ? "&" : "?";
+        var url = path + sep + "t=" + encodeURIComponent(TOKEN);
+        if (extra) url += "&" + extra;
+        return url;
+      }
+
+      function markExpired() {
+        if (expired) return;
+        expired = true;
+        expiredEl.hidden = false;
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      }
+
+      // --- Receive list ------------------------------------------------------
+
+      function refreshFiles() {
+        if (expired) return;
+        fetch(withToken("/api/files"), { cache: "no-store" })
+          .then(function (res) {
+            if (res.status === 403) {
+              markExpired();
+              return null;
+            }
+            if (!res.ok) return null;
+            return res.json();
+          })
+          .then(function (data) {
+            if (!data || !Array.isArray(data.files)) return;
+            files = data.files;
+            renderFiles();
+          })
+          .catch(function () {
+            /* transient network error: keep the current list */
+          });
+      }
+
+      function renderFiles() {
+        // Drop selections for files that no longer exist.
+        var present = Object.create(null);
+        for (var i = 0; i < files.length; i++) present[files[i].id] = true;
+        for (var key in selected) {
+          if (!present[key]) delete selected[key];
+        }
+
+        recvListEl.textContent = "";
+        var hasFiles = files.length > 0;
+        recvEmptyEl.hidden = hasFiles;
+        recvToolsEl.hidden = !hasFiles;
+        selectAllWrap.hidden = !hasFiles;
+
+        var total = 0;
+        for (var j = 0; j < files.length; j++) {
+          var file = files[j];
+          total += Number(file.size) || 0;
+          recvListEl.appendChild(buildFileRow(file));
+        }
+
+        recvSummaryEl.textContent = hasFiles
+          ? files.length + " 个文件 · " + formatBytes(total)
+          : "";
+
+        updateSelectionUi();
+      }
+
+      function buildFileRow(file) {
+        var li = document.createElement("li");
+        li.className = "file-item";
+
+        var check = document.createElement("input");
+        check.type = "checkbox";
+        check.className = "check";
+        check.checked = !!selected[file.id];
+        check.addEventListener("change", function () {
+          if (check.checked) selected[file.id] = true;
+          else delete selected[file.id];
+          updateSelectionUi();
+        });
+
+        var text = document.createElement("div");
+        text.className = "file-text";
+        var name = document.createElement("div");
+        name.className = "file-name";
+        name.textContent = file.name;
+        var meta = document.createElement("div");
+        meta.className = "file-meta";
+        meta.textContent = formatBytes(file.size);
+        text.appendChild(name);
+        text.appendChild(meta);
+
+        var dl = document.createElement("a");
+        dl.className = "btn sm";
+        dl.textContent = "下载";
+        dl.href = withToken("/api/file/" + encodeURIComponent(file.id));
+        dl.setAttribute("download", file.name);
+
+        li.appendChild(check);
+        li.appendChild(text);
+        li.appendChild(dl);
+        return li;
+      }
+
+      function selectedIds() {
+        var ids = [];
+        for (var i = 0; i < files.length; i++) {
+          if (selected[files[i].id]) ids.push(files[i].id);
+        }
+        return ids;
+      }
+
+      function updateSelectionUi() {
+        var ids = selectedIds();
+        var count = ids.length;
+        selectAllEl.checked = files.length > 0 && count === files.length;
+        selectAllEl.indeterminate = count > 0 && count < files.length;
+        if (count > 0) {
+          var size = 0;
+          for (var i = 0; i < files.length; i++) {
+            if (selected[files[i].id]) size += Number(files[i].size) || 0;
+          }
+          downloadZipBtn.textContent = "下载所选(zip) · " + count + " 项 · " + formatBytes(size);
+        } else {
+          downloadZipBtn.textContent = "全部打包下载";
+        }
+      }
+
+      selectAllEl.addEventListener("change", function () {
+        if (selectAllEl.checked) {
+          for (var i = 0; i < files.length; i++) selected[files[i].id] = true;
+        } else {
+          selected = Object.create(null);
+        }
+        renderFiles();
+      });
+
+      downloadZipBtn.addEventListener("click", function () {
+        if (!files.length) return;
+        var ids = selectedIds();
+        var extra = ids.length > 0 ? "ids=" + ids.map(encodeURIComponent).join(",") : null;
+        // A plain navigation works best for streamed downloads on mobile.
+        window.location.href = withToken("/api/zip", extra);
+      });
+
+      // --- Upload ------------------------------------------------------------
+
+      pickBtn.addEventListener("click", function () {
+        if (expired) {
+          showToast("链接已失效，请重新扫码");
+          return;
+        }
+        fileInput.click();
+      });
+
+      fileInput.addEventListener("change", function () {
+        var chosen = Array.prototype.slice.call(fileInput.files || []);
+        fileInput.value = "";
+        if (!chosen.length) return;
+        var queue = chosen.slice();
+        uploadSequentially(queue);
+      });
+
+      function uploadSequentially(queue) {
+        if (!queue.length) return;
+        var file = queue.shift();
+        uploadOne(file, function () {
+          uploadSequentially(queue);
+        });
+      }
+
+      function uploadOne(file, done) {
+        var row = buildUploadRow(file);
+        upListEl.insertBefore(row.li, upListEl.firstChild);
+        sendUpload(file, row, done);
+      }
+
+      function buildUploadRow(file) {
+        var li = document.createElement("li");
+        li.className = "up-item";
+
+        var top = document.createElement("div");
+        top.className = "up-top";
+        var name = document.createElement("div");
+        name.className = "up-name";
+        name.textContent = file.name;
+        var state = document.createElement("div");
+        state.className = "up-state";
+        state.textContent = "0%";
+        top.appendChild(name);
+        top.appendChild(state);
+
+        var track = document.createElement("div");
+        track.className = "up-track";
+        var bar = document.createElement("div");
+        bar.className = "up-bar";
+        track.appendChild(bar);
+
+        li.appendChild(top);
+        li.appendChild(track);
+        return { li: li, state: state, bar: bar };
+      }
+
+      function sendUpload(file, row, done) {
+        row.li.className = "up-item";
+        var retry = row.li.querySelector(".up-retry");
+        if (retry) retry.parentNode.removeChild(retry);
+
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", withToken("/api/upload", "name=" + encodeURIComponent(file.name)));
+        xhr.setRequestHeader("Content-Type", "application/octet-stream");
+
+        xhr.upload.onprogress = function (event) {
+          if (event.lengthComputable) {
+            var pct = Math.round((event.loaded / event.total) * 100);
+            row.bar.style.width = pct + "%";
+            row.state.textContent = pct + "%";
+          }
+        };
+
+        xhr.onload = function () {
+          var data = null;
+          try {
+            data = JSON.parse(xhr.responseText);
+          } catch (e) {
+            data = null;
+          }
+          if (xhr.status === 403) markExpired();
+          if (xhr.status >= 200 && xhr.status < 300 && data && data.ok) {
+            row.li.className = "up-item ok";
+            row.bar.style.width = "100%";
+            row.state.textContent = "已发送";
+          } else {
+            var message = (data && data.error) || "上传失败";
+            failUpload(file, row, message);
+          }
+          if (done) done();
+        };
+
+        xhr.onerror = function () {
+          failUpload(file, row, "网络错误");
+          if (done) done();
+        };
+
+        xhr.send(file);
+      }
+
+      function failUpload(file, row, message) {
+        row.li.className = "up-item err";
+        row.state.textContent = message;
+        var retry = document.createElement("button");
+        retry.className = "btn sm up-retry";
+        retry.type = "button";
+        retry.textContent = "重试";
+        retry.addEventListener("click", function () {
+          row.bar.style.width = "0%";
+          row.state.textContent = "0%";
+          sendUpload(file, row, null);
+        });
+        row.li.appendChild(retry);
+      }
+
+      // --- Boot --------------------------------------------------------------
+
+      if (!TOKEN) {
+        markExpired();
+      } else {
+        refreshFiles();
+        pollTimer = setInterval(refreshFiles, 3000);
+        document.addEventListener("visibilitychange", function () {
+          if (!document.hidden) refreshFiles();
+        });
+      }
+    </script>
+  </body>
+</html>

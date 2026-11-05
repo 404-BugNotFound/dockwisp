@@ -496,6 +496,7 @@ function applyFileTagFilter(list) {
   return list.filter((match) => {
     if (isStatusRow(match)) return true;
     if (match.action === "convert") return true; // keep the "更多选项" entry
+    if (match.action === "lan-transfer") return true;
     const haystack = `${match.title || ""} ${match.subtitle || ""}`.toLowerCase();
     return haystack.includes(needle);
   });

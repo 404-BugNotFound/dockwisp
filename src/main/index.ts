@@ -59,6 +59,7 @@ import { diagLog } from "./diag-log";
 import { HostsController } from "./hosts-controller";
 import { DiffController } from "./diff-controller";
 import { ConvertController } from "./convert-controller";
+import { LanTransferController } from "./lan-transfer-controller";
 import { isConvertibleFile } from "../core/file-convert";
 import {
   customItemKey,
@@ -952,6 +953,12 @@ const CONVERT_ICON_URL =
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h13l-3.5-3.5M20 16H7l3.5 3.5"/></svg>',
   );
 
+const LAN_TRANSFER_ICON_URL =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="11" height="8" rx="1.2"/><path d="M5.5 16h5"/><rect x="16" y="7" width="5.5" height="11" rx="1.2"/><path d="M18 15.5h1.5"/></svg>',
+  );
+
 /**
  * Presentation + action metadata for each built-in feature id, keyed to the
  * ids in src/core/builtin-features.ts. `builtinMatches` looks a feature up here
@@ -1015,6 +1022,13 @@ const BUILTIN_FEATURE_META: Record<string, BuiltinFeatureMeta> = {
     subtitle: "打开翻译窗口，编辑并翻译文本",
     payload: "",
     iconUrl: TRANSLATE_ICON_URL,
+  },
+  "builtin:lan-transfer": {
+    action: "lan-transfer",
+    title: "局域网互传",
+    subtitle: "扫码在手机与电脑之间互传文件",
+    payload: "",
+    iconUrl: LAN_TRANSFER_ICON_URL,
   },
 };
 
@@ -1766,6 +1780,7 @@ void app.whenReady().then(async () => {
   const diffController = new DiffController(settingsStore);
   const convertController = new ConvertController(settingsStore);
   const translateWindow = new TranslateWindowController(settingsStore);
+  const lanTransfer = new LanTransferController(settingsStore);
   const convertedOutputs = new Set<string>();
   registerUpdater({
     getWindow: () => launcher,
@@ -1786,6 +1801,7 @@ void app.whenReady().then(async () => {
     else if (id === "builtin:diff") diffController.open();
     else if (id === "builtin:convert") convertController.open();
     else if (id === "builtin:translate-window") translateWindow.open();
+    else if (id === "builtin:lan-transfer") lanTransfer.open();
   });
   const previewController = new PreviewController(settingsStore, () => {
     // Closing a preview returns to the existing file results instead of
@@ -1854,6 +1870,15 @@ void app.whenReady().then(async () => {
         featureCount: 1,
         builtin: true,
         iconUrl: TRANSLATE_ICON_URL,
+      },
+      {
+        id: "builtin:lan-transfer",
+        name: "局域网互传",
+        description: "扫码在手机与电脑之间互传文件，支持批量与打包下载",
+        version: "内置",
+        featureCount: 1,
+        builtin: true,
+        iconUrl: LAN_TRANSFER_ICON_URL,
       },
       ...installed,
     ];
@@ -2008,6 +2033,19 @@ void app.whenReady().then(async () => {
         });
       }
       // Plugin "files" commands keep working behind the convert targets.
+      const sendable = input.data.filter((file) => file.isFile).map((file) => file.path);
+      if (sendable.length > 0) {
+        matches.push({
+          id: "builtin:lan-transfer",
+          kind: "builtin",
+          action: "lan-transfer",
+          title: sendable.length === 1 ? "发送到手机" : `发送 ${sendable.length} 个文件到手机`,
+          subtitle: "局域网互传 · 手机扫码下载",
+          score: 1_100,
+          payload: JSON.stringify(sendable),
+          iconUrl: LAN_TRANSFER_ICON_URL,
+        });
+      }
       const pluginFileMatches = searchCommands(commands, input, 30);
       const fileMatches = mergeMatches([matches, pluginFileMatches], 36);
       rememberMatches(fileMatches);
@@ -2188,6 +2226,18 @@ void app.whenReady().then(async () => {
           // Text-triggered entry carries no files.
         }
         convertController.open(files);
+        return { ok: true, hide: true };
+      }
+      if (match.action === "lan-transfer") {
+        launcher?.hide();
+        let files: string[] = [];
+        try {
+          const parsed = JSON.parse(match.payload || "[]") as unknown;
+          if (Array.isArray(parsed)) files = parsed.filter((item): item is string => typeof item === "string");
+        } catch {
+          // Keyword-triggered entry carries no files.
+        }
+        lanTransfer.open(files);
         return { ok: true, hide: true };
       }
       if (match.action === "focus-window") {
@@ -2669,6 +2719,7 @@ void app.whenReady().then(async () => {
     if (Date.now() >= suppressLauncherPositionSaveUntil) persistLauncherPosition();
     usage.flush();
     helper.stop();
+    void lanTransfer.dispose();
     globalShortcut.unregisterAll();
   });
 });
