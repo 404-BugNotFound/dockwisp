@@ -1908,8 +1908,9 @@ function showTransLoading(on) {
 }
 
 /* 相邻行合并成段落。box 为选区图片像素坐标，这里转成原图坐标。
- * 只有同栏、紧接下方、行高相近、且上一行“写满”的行才并入同段，
- * 避免把标题、列表项、另一栏并进正文。 */
+ * 同一段的判断只看版面本身：同类文字、左边缘对齐、行高相近、行距一致。
+ * 不再看上一行是否“写满”，也不用固定的行间空隙阈值：
+ * 这两条在框选范围差几像素时会落在临界值两侧，导致同一屏每次合并结果不同。 */
 function mergeLines(lines) {
   const sx = selection.x;
   const sy = selection.y;
@@ -1925,20 +1926,25 @@ function mergeLines(lines) {
       // 片段是否从原行开头开始 / 一直到原行末尾（混排切出来的中间片段两者都不是）。
       lineStart: l.lineStart !== false,
       lineEnd: l.lineEnd !== false,
-      lineRight: l.lineRight != null ? l.lineRight + sx : l.box.x + l.box.width + sx,
     }))
     .sort((a, b) => a.y - b.y || a.x - b.x);
-  // 每一行“所在栏”的右边缘：只看左边缘和它对齐的那些行（同一栏），
-  // 多栏版面里左栏的行就不会拿右栏的右边缘来判断是否写满。
-  const columnRight = (it) => {
-    let right = it.lineRight;
-    for (const other of items) {
-      if (Math.abs(other.x - it.x) < Math.max(it.h, other.h) && other.lineRight > right) {
-        right = other.lineRight;
-      }
+
+  // 整张截图的典型行距：每行到它正下方最近一行（同类、左边缘对齐、字号相近）的距离取中位数。
+  // 段内行距都接近它，段落之间的空行明显更大；它不受单行行框高度误差的影响。
+  const pitches = [];
+  for (const a of items) {
+    let nearest = Infinity;
+    for (const b of items) {
+      const d = b.y - a.y;
+      const lh = (a.h + b.h) / 2;
+      if (d < lh * 0.5 || b.kind !== a.kind || Math.abs(b.x - a.x) >= lh) continue;
+      if (Math.abs(b.h - a.h) > Math.max(a.h, b.h) * 0.45) continue;
+      nearest = Math.min(nearest, d);
     }
-    return right;
-  };
+    if (Number.isFinite(nearest)) pitches.push(nearest);
+  }
+  pitches.sort((p, q) => p - q);
+  const typicalPitch = pitches.length >= 2 ? pitches[Math.floor(pitches.length / 2)] : 0;
 
   const paras = [];
   const used = new Array(items.length).fill(false);
@@ -1955,33 +1961,26 @@ function mergeLines(lines) {
       searching = false;
       const prev = cur.lines[cur.lines.length - 1];
       let bestIdx = -1;
-      let bestGap = Infinity;
+      let bestPitch = Infinity;
       for (let j = 0; j < items.length; j++) {
         if (used[j]) continue;
         const cand = items[j];
-        if (cand.y < prev.y) continue; // 只找下方
+        const pitch = cand.y - prev.y; // 行距：上一行顶到这一行顶
         const lineH = (prev.h + cand.h) / 2;
-        const gap = cand.y - (prev.y + prev.h);
-        if (gap >= lineH * 0.6) continue; // 纵向间距过大
-        if (gap < -prev.h * 0.5) continue; // 同一行的另一块，跳过
-        // 同一栏：左边缘接近，且横向有重叠。
-        const leftClose = Math.abs(cand.x - cur.x) < lineH * 1.0;
-        const overlap =
-          Math.min(cand.x + cand.w, cur.right) - Math.max(cand.x, cur.x) > 0;
-        if (!leftClose || !overlap) continue;
-        // 行高相近（标题/正文字号不同就分开）。
-        if (Math.abs(cand.h - prev.h) > Math.max(cand.h, prev.h) * 0.25) continue;
-        // 混排时中文片段和英文片段各自成段，避免英文被并进中文段落后不翻译。
-        if (cand.kind !== prev.kind) continue;
-        // 跨行续写只发生在“上一段写到行尾、下一段从行首开始”的地方。
-        if (!prev.lineEnd || !cand.lineStart) continue;
-        // 上一行必须“写满”：写到了它所在这一栏的右边缘附近（自动换行），
-        // 而不是短句、标题、按钮文字或列表项。
-        const colRight = columnRight(prev);
-        const colW = colRight - prev.x;
-        if (prev.lineRight < colRight - Math.max(lineH * 2, colW * 0.2)) continue;
-        if (gap < bestGap) {
-          bestGap = gap;
+        if (pitch < lineH * 0.5) continue; // 只找下方的行（同一行的其他片段跳过）
+        if (cand.kind !== prev.kind) continue; // 中英片段各自成段
+        if (!prev.lineEnd || !cand.lineStart) continue; // 只在行尾→行首处续写
+        if (Math.abs(cand.x - cur.x) >= lineH) continue; // 左边缘对齐（同一栏）
+        // 字号相近：只拦住明显不同的字号。正文行框高度会随字母上下伸出部分
+        // （g、y、引号）浮动三成以上，卡得太紧会把同一段拆开；标题和正文主要靠行距区分。
+        const paraH = cur.lines.reduce((s, l) => s + l.h, 0) / cur.lines.length;
+        if (Math.abs(cand.h - paraH) > Math.max(cand.h, paraH) * 0.45) continue;
+        // 行距一致：和整张图的典型行距相差不超过 30%；段落之间的空行会大得多。
+        // 只有一两行、算不出典型行距时，退回到“不超过 1.9 倍行高”。
+        const limit = typicalPitch > 0 ? typicalPitch * 1.3 : lineH * 1.9;
+        if (pitch > limit) continue;
+        if (pitch < bestPitch) {
+          bestPitch = pitch;
           bestIdx = j;
         }
       }
@@ -2009,12 +2008,85 @@ const CJK_RE =
 function isCjkChar(ch) {
   return !!ch && CJK_RE.test(ch);
 }
+// 全角标点（。，：、（）等），用来判断“中文标点后面紧跟英文”的情况。
+const CJK_PUNCT_RE = /[\u3000-\u303f\uff00-\uffef]/;
+
+/* 给一行里的每个字符标上类别：中日韩文字与全角标点为 "cjk"，字母为 "latin"。
+ * 其余字符（数字、— – - · " " ( ) 空格、半角标点等）中英文都会用，本身不定类别：
+ * 两侧同类就归那一类；两侧不同时，紧跟在中文标点后、后面是英文的归英文
+ * （「作文范文：Reading — A Good Habit」里的 — 和空格归英文），否则归前一类
+ * （「版本 1.2.3」里的版本号跟着中文，不会被单独切出来覆盖）。 */
+function classifyChars(chars) {
+  const kinds = chars.map((ch) => (isCjkChar(ch) ? "cjk" : /\p{L}/u.test(ch) ? "latin" : null));
+  const resolved = kinds.slice();
+  for (let i = 0; i < kinds.length; i++) {
+    if (kinds[i]) continue;
+    let p = i - 1;
+    while (p >= 0 && !kinds[p]) p--;
+    let n = i + 1;
+    while (n < kinds.length && !kinds[n]) n++;
+    const before = p >= 0 ? kinds[p] : null;
+    const after = n < kinds.length ? kinds[n] : null;
+    if (!before || !after) resolved[i] = before || after || "latin";
+    else if (before === after) resolved[i] = before;
+    else if (before === "cjk" && after === "latin" && CJK_PUNCT_RE.test(chars[p])) resolved[i] = "latin";
+    else resolved[i] = before;
+  }
+  return resolved;
+}
+
+/* 在原图上找混排切分点附近真正的空白列，让覆盖范围贴着文字边界。
+ * box 是原图坐标的行框；estX 是按字宽估算的切分点。
+ * 在估算点左右一个多字宽的范围里，找“整列几乎都是背景色”的连续区间，
+ * 取离估算点最近那段的中点；找不到空白（文字紧挨着）就仍用估算值。 */
+function snapSplitX(box, estX) {
+  const range = Math.max(4, box.height * 1.2);
+  const x0 = clamp(Math.floor(estX - range), Math.ceil(box.x), natW - 1);
+  const x1 = clamp(Math.ceil(estX + range), x0 + 1, Math.min(natW, Math.floor(box.x + box.width)));
+  const y0 = clamp(Math.round(box.y), 0, natH - 1);
+  const h = clamp(Math.round(box.height), 1, natH - y0);
+  const w = x1 - x0;
+  if (w < 2) return estX;
+  let data;
+  try {
+    data = sctx.getImageData(x0, y0, w, h).data;
+  } catch {
+    return estX;
+  }
+  const { bg } = sampleBoxColors(sctx, { x: Math.round(box.x), y: y0, width: Math.round(box.width), height: h });
+  const blank = new Array(w).fill(false);
+  for (let cx = 0; cx < w; cx++) {
+    let same = 0;
+    for (let cy = 0; cy < h; cy++) {
+      const idx = (cy * w + cx) * 4;
+      if (colorDist([data[idx], data[idx + 1], data[idx + 2]], bg) < 60) same++;
+    }
+    blank[cx] = same >= h * 0.95;
+  }
+  let best = estX;
+  let bestDist = Infinity;
+  for (let cx = 0; cx < w; ) {
+    if (!blank[cx]) {
+      cx++;
+      continue;
+    }
+    let end = cx;
+    while (end + 1 < w && blank[end + 1]) end++;
+    const mid = x0 + (cx + end + 1) / 2;
+    const dist = Math.abs(mid - estX);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = mid;
+    }
+    cx = end + 1;
+  }
+  return best;
+}
 
 /* 把中英混排的一行按文字类别切成片段，每段带自己的行框。
  * 例如「设置 Settings 已保存」切成「设置」「Settings」「已保存」，
  * 这样只有英文片段会被翻译和覆盖，中文原样保留。
- * 数字、空格、标点不决定类别，归到相邻的片段里；
- * 每个字符的横向位置按字宽比例估算（与选字模型同一套算法）。 */
+ * 切分点先按字宽比例估算，再在原图上对齐到附近的空白列（粗体、等宽字体的字宽和估算不同）。 */
 function splitMixedLines(lines) {
   const out = [];
   octx.save();
@@ -2023,53 +2095,54 @@ function splitMixedLines(lines) {
     const text = String(l.text || "");
     if (text.trim() === "") continue;
     const chars = Array.from(text);
-    const kinds = chars.map((ch) => (isCjkChar(ch) ? "cjk" : /\p{L}/u.test(ch) ? "latin" : null));
-    // 中性字符（数字/标点/空格）跟随前一个有类别的字符；行首的跟随后一个。
-    let last = null;
-    for (let i = 0; i < kinds.length; i++) {
-      if (kinds[i]) last = kinds[i];
-      else kinds[i] = last;
-    }
-    let next = null;
-    for (let i = kinds.length - 1; i >= 0; i--) {
-      if (kinds[i]) next = kinds[i];
-      else kinds[i] = next || "latin";
-    }
+    const kinds = classifyChars(chars);
     const firstKind = kinds[0];
-    const lineRight = l.box.x + l.box.width;
     if (kinds.every((k) => k === firstKind)) {
-      out.push({ text, box: l.box, kind: firstKind, lineStart: true, lineEnd: true, lineRight });
+      out.push({ text, box: l.box, kind: firstKind, lineStart: true, lineEnd: true });
       continue;
     }
     octx.font = `${Math.max(8, l.box.height * 0.8)}px "Segoe UI","Microsoft YaHei",sans-serif`;
     const widths = chars.map((ch) => octx.measureText(ch).width || 1);
     const total = widths.reduce((s, w) => s + w, 0) || 1;
-    let start = 0;
-    let acc = 0;
-    for (let i = 1; i <= chars.length; i++) {
+    const xAt = (i) => l.box.x + (widths.slice(0, i).reduce((s, w) => s + w, 0) / total) * l.box.width;
+    // 原图坐标的行框，用来在底图上找空白列。
+    const imgBox = { x: l.box.x + selection.x, y: l.box.y + selection.y, width: l.box.width, height: l.box.height };
+
+    // 先切出 [start, end) 字符区间，再把相邻片段之间的边界对齐到原图空白处。
+    const runs = [];
+    for (let start = 0, i = 1; i <= chars.length; i++) {
       if (i < chars.length && kinds[i] === kinds[start]) continue;
-      const segW = widths.slice(start, i).reduce((s, w) => s + w, 0);
-      const piece = chars.slice(start, i).join("");
-      if (piece.trim() !== "") {
-        // 去掉片段两端空白对应的宽度，让行框贴住文字。
-        const lead = piece.length - piece.trimStart().length;
-        const trail = piece.length - piece.trimEnd().length;
-        const leadW = widths.slice(start, start + lead).reduce((s, w) => s + w, 0);
-        const trailW = widths.slice(i - trail, i).reduce((s, w) => s + w, 0);
-        const x0 = l.box.x + ((acc + leadW) / total) * l.box.width;
-        const x1 = l.box.x + ((acc + segW - trailW) / total) * l.box.width;
-        out.push({
-          text: piece.trim(),
-          box: { x: x0, y: l.box.y, width: Math.max(1, x1 - x0), height: l.box.height },
-          kind: kinds[start],
-          lineStart: start === 0,
-          lineEnd: i === chars.length,
-          lineRight,
-        });
-      }
-      acc += segW;
+      runs.push({ start, end: i, kind: kinds[start] });
       start = i;
     }
+    const edges = [l.box.x];
+    for (let r = 1; r < runs.length; r++) {
+      // 边界取两段文字之间（去掉空白后）的中点，再找最近的空白列。
+      const prev = runs[r - 1];
+      const next = runs[r];
+      const prevText = chars.slice(prev.start, prev.end).join("");
+      const nextText = chars.slice(next.start, next.end).join("");
+      const prevEnd = xAt(prev.end - (prevText.length - prevText.trimEnd().length));
+      const nextStart = xAt(next.start + (nextText.length - nextText.trimStart().length));
+      const est = (prevEnd + nextStart) / 2;
+      edges.push(snapSplitX(imgBox, est + selection.x) - selection.x);
+    }
+    edges.push(l.box.x + l.box.width);
+
+    runs.forEach((run, r) => {
+      const piece = chars.slice(run.start, run.end).join("");
+      if (piece.trim() === "") return;
+      // 片段框各外扩 1px，但不超出原行框。
+      const x0 = Math.max(l.box.x, edges[r] - 1);
+      const x1 = Math.min(l.box.x + l.box.width, edges[r + 1] + 1);
+      out.push({
+        text: piece.trim(),
+        box: { x: x0, y: l.box.y, width: Math.max(1, x1 - x0), height: l.box.height },
+        kind: run.kind,
+        lineStart: run.start === 0,
+        lineEnd: run.end === chars.length,
+      });
+    });
   }
   octx.restore();
   return out;
@@ -2214,9 +2287,10 @@ function rgb(c) {
 }
 
 /* 在段落框内绘制译文：
- * - 先按每个原文行的行框（外扩 2px）填背景色；
+ * - 先按每个原文行的行框填背景色；
  * - 从框顶开始，用原文平均行距作为译文行距，第一行译文与第一行原文对齐；
- * - 初始字号 ≈ 原文行框高 × 0.78，排不下再缩小（下限 10px）；左对齐、顶对齐。 */
+ * - 起始字号 ≈ 原文平均行高 × 0.78，排不下再缩小，但不小于原文行高的 0.6 倍：
+ *   宁可多占一两行，也不要把译文缩成明显小于原文的小字。 */
 function paintParagraph(para, box, text, colors) {
   tctx.save();
 
@@ -2232,20 +2306,19 @@ function paintParagraph(para, box, text, colors) {
   const singleRow = rows.length === 1;
   const availW = box.width - (singleRow ? 0 : 2);
   const firstRowH = rows[0].h;
+  const rowH = para.lineH || firstRowH;
   const lineStep = para.lineStep || firstRowH;
-  // 译文行距不小于字号的 1.15 倍，避免字号大时重叠。
-  const maxFont = Math.max(10, Math.min(firstRowH * 0.9, firstRowH * 0.78 + 2));
-  const minFont = 10;
+  const startFont = Math.max(10, Math.round(rowH * 0.78));
+  const minFont = Math.max(10, Math.round(rowH * 0.6));
 
-  // 从初始字号往下找：能把译文排进（段落框高 + 行距容差）的最大字号。
-  const startFont = Math.max(minFont, Math.round(firstRowH * 0.78));
+  // 从起始字号往下找：能把译文排进（段落框高 + 一个行距）的最大字号；
+  // 到下限仍放不下，就用下限字号，让多出来的行继续往下画。
   let chosen = null;
-  for (let font = Math.min(startFont, Math.round(maxFont)); font >= minFont; font--) {
+  for (let font = startFont; font >= minFont; font--) {
     const step = Math.max(lineStep, font * 1.15);
     const lines = wrapText(text, availW, font);
     const totalH = (lines.length - 1) * step + font * 1.2;
-    // 第一行顶部与原文第一行顶部对齐；最多比原文多出半行，避免盖住下方内容。
-    if (totalH <= box.height + step * 0.5 || font === minFont) {
+    if (totalH <= box.height + step || font === minFont) {
       chosen = { font, step, lines };
       break;
     }
@@ -2257,7 +2330,7 @@ function paintParagraph(para, box, text, colors) {
   if (singleRow && chosen.lines.length > 1) {
     // 单行：改成一行显示，字号按宽度缩小（不低于 9px）。
     tctx.save();
-    let font = Math.max(minFont, Math.round(firstRowH * 0.78));
+    let font = startFont;
     tctx.font = `${font}px "Microsoft YaHei","Segoe UI",sans-serif`;
     const w = tctx.measureText(text).width;
     if (w > availW) font = Math.max(9, Math.floor((font * availW) / w));

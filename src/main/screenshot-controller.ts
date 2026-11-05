@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { translateText } from "../translation/providers";
 import { detectLanguage } from "../translation/language";
+import { repairOcrSpacing } from "../core/ocr-words";
 import { MouseHelper } from "./mouse-helper";
 import { ocrResizeDimensions, recognizeImageFile, recognizeImageLayout, warmupOcr } from "./ocr";
 import { SettingsStore } from "./settings";
@@ -53,6 +54,14 @@ const PAINT_TIMEOUT_MS = 250;
 const HOTKEY_REPEAT_GAP_MS = 1_100;
 // Target languages the screenshot translate picker may request.
 const SCREENSHOT_TARGETS = new Set(["zh-CN", "en", "ja", "ko"]);
+
+/**
+ * In-process cache of screenshot translations, oldest first (Map keeps
+ * insertion order). Capturing the same screen again returns the same text
+ * instead of a possibly different answer from the free translation service.
+ */
+const TRANSLATION_CACHE_LIMIT = 500;
+const translationCache = new Map<string, string>();
 
 /** A position to the right of every display, so a shown window is not visible. */
 function offscreenOrigin(): { x: number; y: number } {
@@ -712,17 +721,33 @@ export class ScreenshotController {
     const worker = async (): Promise<void> => {
       while (cursor < indices.length) {
         const index = indices[cursor++];
-        const text = inputs[index];
+        // OCR often splits or joins English words; fix that before translating.
+        const text = repairOcrSpacing(inputs[index]);
+        const source = sources[index] as string;
+        const cacheKey = [translation.provider, translation.endpoint, source, target, text].join("\u0001");
+        const cached = translationCache.get(cacheKey);
+        if (cached !== undefined) {
+          // Re-insert so the entry counts as most recently used.
+          translationCache.delete(cacheKey);
+          translationCache.set(cacheKey, cached);
+          translations[index] = cached;
+          anySuccess = true;
+          continue;
+        }
         try {
           const result = await translateText({
             text,
             provider: translation.provider,
             endpoint: translation.endpoint,
             apiKey: translation.apiKey,
-            source: sources[index] as string,
+            source,
             target,
           });
           translations[index] = result.translatedText;
+          translationCache.set(cacheKey, result.translatedText);
+          if (translationCache.size > TRANSLATION_CACHE_LIMIT) {
+            translationCache.delete(translationCache.keys().next().value as string);
+          }
           anySuccess = true;
         } catch (error) {
           skipped[index] = true;
