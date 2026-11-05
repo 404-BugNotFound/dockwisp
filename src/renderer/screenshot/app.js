@@ -26,11 +26,11 @@ const api = window.screenshot || {
   async translate(t) {
     return { translatedText: t, sourceLanguage: "auto", targetLanguage: "zh", provider: "mock" };
   },
-  async translateBatch(texts) {
+  async translateBatch(texts, target) {
     return {
       translations: texts.map((t) => "[译] " + t),
       sourceLanguage: "en",
-      targetLanguage: "zh",
+      targetLanguage: target || "zh-CN",
       provider: "mock",
     };
   },
@@ -70,10 +70,12 @@ const panelSourceWrap = document.getElementById("panelSourceWrap");
 const panelSource = document.getElementById("panelSource");
 const panelTextLabel = document.getElementById("panelTextLabel");
 const panelText = document.getElementById("panelText");
+const panelTransWrap = document.getElementById("panelTransWrap");
+const panelTrans = document.getElementById("panelTrans");
 const panelFoot = document.getElementById("panelFoot");
 
 const octx = anno.getContext("2d");
-const sctx = shot.getContext("2d", { alpha: false });
+const sctx = shot.getContext("2d", { alpha: false, willReadFrequently: true });
 const tctx = trans.getContext("2d");
 
 /* ------------------------------ 配置 ------------------------------ */
@@ -137,6 +139,14 @@ let translating = false;
 
 // 提取文字高亮数据。
 let ocrLayout = null; // { lines:[{text,box}] }
+// 提取文字模型：阅读顺序的行 + 字符矩形 + 全文映射。
+let ocrModel = null; // { lines:[{text, box, chars:[{x,w}], startOffset, len}], fullText }
+// 文字选择（全局字符偏移，含行间 \n）。
+let ocrSel = null; // { anchor, focus } 或 null
+let ocrSelecting = false; // 图上正在拖动选字
+let suppressPanelSelSync = false; // 防止面板/图互相触发死循环
+// 面板译文缓存。
+let panelTransText = null;
 
 // 识别缓存（提取文字面板用）。
 let ocrText = null;
@@ -154,6 +164,7 @@ const pointer = {
   annoOrigin: null, // 选中标注拖动前的快照
   preSnapshot: null, // 拖动前整组标注快照（用于撤销）
   moved: false,
+  ocrAnchor: 0, // 提取文字选字的起点偏移
 };
 
 /* --------------------------- 视图变换 --------------------------- */
@@ -311,6 +322,10 @@ function resetAll() {
   transVisible = false;
   translating = false;
   ocrLayout = null;
+  ocrModel = null;
+  ocrSel = null;
+  ocrSelecting = false;
+  panelTransText = null;
   ocrText = null;
   history = [];
   currentPanel = null;
@@ -332,6 +347,8 @@ function resetAll() {
   brushCursor.hidden = true;
   root.dataset.hasSelection = "false";
   root.dataset.long = "false";
+  root.dataset.ocr = "false";
+  if (typeof CSS !== "undefined" && CSS.highlights) CSS.highlights.delete("ocr-sel");
   selEl.hidden = true;
   toolbar.hidden = true;
   subbar.hidden = true;
@@ -340,6 +357,7 @@ function resetAll() {
   toast.classList.remove("show");
   transLoading.hidden = true;
   transToggle.hidden = true;
+  setTransTarget(DEFAULT_TRANS_TARGET);
   trans.hidden = true;
   textEditor.hidden = true;
   ocrBoxes.innerHTML = "";
@@ -415,14 +433,11 @@ document.getElementById("long").addEventListener("click", startLong);
 
 document.getElementById("panelClose").addEventListener("click", hidePanel);
 document.getElementById("panelCopy").addEventListener("click", copyPanel);
-document.getElementById("panelSelectAll").addEventListener("click", () => {
-  panelText.focus();
-  panelText.select();
-});
-panelText.addEventListener("pointerdown", (e) => e.stopPropagation());
-panelText.addEventListener("input", () => {
-  if (currentPanel === "ocr") ocrText = panelText.value;
-});
+document.getElementById("panelTranslate").addEventListener("click", translatePanel);
+document.getElementById("panelTransCopy").addEventListener("click", copyPanelTrans);
+panel.addEventListener("pointerdown", (e) => e.stopPropagation());
+// 面板里用鼠标选择文字 → 反向联动到图上高亮。
+document.addEventListener("selectionchange", onPanelSelectionChange);
 
 for (const btn of transToggle.querySelectorAll(".seg button")) {
   btn.addEventListener("click", () => setTransView(btn.dataset.trans === "dst"));
@@ -433,6 +448,13 @@ function setTool(tool) {
   commitTextEditor();
   activeTool = activeTool === tool ? null : tool;
   selectedIndex = -1;
+  // 选了画图工具时退出文字选择交互（保留 OCR 行框高亮）。
+  if (activeTool && ocrModel && ocrSel) {
+    ocrSel = null;
+    ocrSelecting = false;
+    renderOcrSelection();
+    if (typeof CSS !== "undefined" && CSS.highlights) CSS.highlights.delete("ocr-sel");
+  }
   root.dataset.toolActive = activeTool ? "true" : "false";
   if (activeTool !== "mosaic") updateBrushCursor(null);
   annoDirty = true;
@@ -598,7 +620,7 @@ root.addEventListener("contextmenu", (e) => {
     selectedIndex = -1;
     annoDirty = true;
     ocrText = null;
-    ocrLayout = null;
+    if (ocrLayout || ocrModel) exitOcrMode();
     clearTranslation();
     activeTool = null;
     root.dataset.toolActive = "false";
@@ -631,7 +653,7 @@ function insideSelection(p) {
 function invalidateSelectionState(clearAnnotations) {
   selectionVersion += 1;
   ocrText = null;
-  ocrLayout = null;
+  if (ocrLayout || ocrModel) exitOcrMode();
   clearTranslation();
   if (clearAnnotations && annotations.length > 0) {
     annotations = [];
@@ -666,6 +688,20 @@ function onPointerDown(ev) {
   // 2) 已有选区 + 选了标注工具 + 在选区内 → 绘制 / 放置新标注。
   if (selection && activeTool && insideSelection(p)) {
     if (startAnnotationDraw(p)) return;
+  }
+
+  // 2.5) 提取文字模式（无工具）：在选区内按下 → 自由选字，不移动/重框选。
+  if (ocrModel && !activeTool && selection && insideSelection(p)) {
+    ocrSelecting = true;
+    pointer.mode = "ocrSelect";
+    pointer.moved = false;
+    const off = pointToOffset(p);
+    pointer.ocrAnchor = off;
+    pointer.ocrClickLine = offsetLineRange(p); // 单击选整行用
+    ocrSel = { anchor: off, focus: off };
+    root.dataset.mode = "idle";
+    renderOcrSelection();
+    return;
   }
 
   // 3) 命中选区手柄 → 调整大小。
@@ -752,6 +788,12 @@ function onPointerMove(ev) {
     render();
   } else if (pointer.mode === "annoMove" || pointer.mode === "annoResize") {
     handleAnnoPointerMove(p);
+  } else if (pointer.mode === "ocrSelect") {
+    pointer.moved = true;
+    const off = pointToOffset(p);
+    ocrSel = { anchor: pointer.ocrAnchor, focus: off };
+    renderOcrSelection();
+    syncSelectionToPanel();
   }
 }
 
@@ -782,6 +824,19 @@ function onPointerUp() {
     annoDirty = true;
   } else if (pointer.mode === "annoMove" || pointer.mode === "annoResize") {
     finishAnnoDrag();
+  } else if (pointer.mode === "ocrSelect") {
+    if (!pointer.moved) {
+      // 单击：选中整行；点在空白（行外）则取消选择。
+      ocrSel = pointer.ocrClickLine || null;
+      renderOcrSelection();
+      syncSelectionToPanel();
+    }
+    ocrSelecting = false;
+    pointer.mode = "idle";
+    pointer.ocrClickLine = null;
+    root.dataset.mode = "idle";
+    render();
+    return;
   }
 
   pointer.mode = "idle";
@@ -906,21 +961,8 @@ function render() {
 }
 
 function repositionOcrBoxes() {
-  if (!ocrLayout || !selection) return;
-  const sx = selection.x;
-  const sy = selection.y;
-  const els = ocrBoxes.children;
-  const lines = ocrLayout.lines;
-  for (let i = 0; i < els.length && i < lines.length; i++) {
-    const ln = lines[i];
-    if (!ln.box) continue;
-    const ix = ln.box.x + sx;
-    const iy = ln.box.y + sy;
-    els[i].style.left = `${vx(ix)}px`;
-    els[i].style.top = `${vy(iy)}px`;
-    els[i].style.width = `${ln.box.width * view.sx}px`;
-    els[i].style.height = `${ln.box.height * view.sy}px`;
-  }
+  // 行框与选中高亮都按当前视图变换重建（行数不多，开销可忽略）。
+  renderOcrBoxes();
 }
 
 function setBox(el, x, y, w, h) {
@@ -1708,6 +1750,87 @@ function setTransView(showDst) {
   }
   syncToolbar();
 }
+
+// 截图翻译的目标语言。每次截图都从中文开始（resetAll 里复位），
+// 切换只对当前这张截图生效；原文语言始终由主进程自动识别。
+const DEFAULT_TRANS_TARGET = "zh-CN";
+const LANG_LABELS = {
+  "zh-CN": "中文",
+  en: "英文",
+  ja: "日文",
+  ko: "韩文",
+  mixed: "多语言",
+  none: "无需翻译",
+};
+let transTargetLang = DEFAULT_TRANS_TARGET;
+const transTargetSelect = document.getElementById("transTarget");
+const panelTargetSelect = document.getElementById("panelTarget");
+
+function setTransTarget(code) {
+  transTargetLang = code || DEFAULT_TRANS_TARGET;
+  transTargetSelect.value = transTargetLang;
+  panelTargetSelect.value = transTargetLang;
+}
+
+/* 把段落翻译成当前目标语言并画到原位；paragraphs 缓存到译文层，切换语言时复用。 */
+async function translateParagraphsInPlace(paragraphs, version) {
+  const target = transTargetLang;
+  const res = await api.translateBatch(paragraphs.map((p) => p.text), target);
+  if (version !== selectionVersion || target !== transTargetLang) return;
+  const translations = (res && res.translations) || [];
+  const skipped = (res && res.skipped) || [];
+  if (paragraphs.length > 0 && paragraphs.every((_, i) => skipped[i])) {
+    showToast(`没有需要翻译成${LANG_LABELS[target] || target}的文字`);
+  }
+  buildTransLayer(paragraphs, translations, skipped);
+  transLayer.sourceParagraphs = paragraphs;
+  transLayer.info = {
+    src: (res && res.sourceLanguage) || "auto",
+    dst: (res && res.targetLanguage) || target,
+    provider: (res && res.provider) || "",
+  };
+  transVisible = true;
+  trans.hidden = false;
+  transToggle.hidden = false;
+  setTransView(true);
+  render();
+}
+
+/* 原位翻译胶囊里切换目标语言：沿用已识别的段落，只重新翻译。 */
+async function retranslateInPlace() {
+  if (!transLayer || !transLayer.sourceParagraphs || translating) return;
+  const paragraphs = transLayer.sourceParagraphs;
+  const version = selectionVersion;
+  translating = true;
+  busy = true;
+  transTargetSelect.disabled = true;
+  setBtnBusy("translate", true);
+  showTransLoading(true);
+  try {
+    await translateParagraphsInPlace(paragraphs, version);
+  } catch (err) {
+    if (version !== selectionVersion) return;
+    showToast("翻译失败：" + messageOf(err));
+  } finally {
+    translating = false;
+    busy = false;
+    transTargetSelect.disabled = false;
+    setBtnBusy("translate", false);
+    showTransLoading(false);
+    syncToolbar();
+  }
+}
+
+transTargetSelect.addEventListener("change", () => {
+  setTransTarget(transTargetSelect.value);
+  void retranslateInPlace();
+});
+transTargetSelect.addEventListener("pointerdown", (e) => e.stopPropagation());
+panelTargetSelect.addEventListener("change", () => {
+  setTransTarget(panelTargetSelect.value);
+  // 面板里已经有译文时，切换语言直接重新翻译。
+  if (!panelTransWrap.hidden) void translatePanel();
+});
 async function toggleTranslate() {
   if (busy || translating) return;
   // 已显示译文 → 关闭译文层。
@@ -1732,6 +1855,8 @@ async function toggleTranslate() {
     showToast("当前版本不支持原位翻译");
     return;
   }
+  // 原位翻译与提取文字互斥：开始翻译前退出提取模式。
+  if (ocrLayout || ocrModel) exitOcrMode();
 
   const version = selectionVersion;
   const url = await exportSelectionPng({ annotations: false, translation: false });
@@ -1750,20 +1875,7 @@ async function toggleTranslate() {
       return;
     }
     const paragraphs = mergeLines(lines);
-    const res = await api.translateBatch(paragraphs.map((p) => p.text));
-    if (version !== selectionVersion) return;
-    const translations = (res && res.translations) || [];
-    buildTransLayer(paragraphs, translations);
-    transLayer.info = {
-      src: (res && res.sourceLanguage) || "auto",
-      dst: (res && res.targetLanguage) || "zh",
-      provider: (res && res.provider) || "",
-    };
-    transVisible = true;
-    trans.hidden = false;
-    transToggle.hidden = false;
-    setTransView(true);
-    render();
+    await translateParagraphsInPlace(paragraphs, version);
   } catch (err) {
     if (version !== selectionVersion) return;
     showToast("翻译失败：" + messageOf(err));
@@ -1795,47 +1907,183 @@ function showTransLoading(on) {
   transLoading.style.top = `${cy}px`;
 }
 
-/* 相邻行合并成段落。box 为选区图片像素坐标，这里转成原图坐标。 */
+/* 相邻行合并成段落。box 为选区图片像素坐标，这里转成原图坐标。
+ * 只有同栏、紧接下方、行高相近、且上一行“写满”的行才并入同段，
+ * 避免把标题、列表项、另一栏并进正文。 */
 function mergeLines(lines) {
   const sx = selection.x;
   const sy = selection.y;
-  // 转原图坐标并按纵向排序。
-  const items = lines
-    .filter((l) => l && l.box && String(l.text || "").trim() !== "")
+  const items = splitMixedLines(lines)
     .map((l) => ({
       text: String(l.text).trim(),
       x: l.box.x + sx,
       y: l.box.y + sy,
       w: l.box.width,
       h: l.box.height,
+      // 片段的文字类别（"cjk" / "latin"），混排时只合并同类片段。
+      kind: l.kind,
+      // 片段是否从原行开头开始 / 一直到原行末尾（混排切出来的中间片段两者都不是）。
+      lineStart: l.lineStart !== false,
+      lineEnd: l.lineEnd !== false,
+      lineRight: l.lineRight != null ? l.lineRight + sx : l.box.x + l.box.width + sx,
     }))
-    .sort((a, b) => a.y - b.y);
+    .sort((a, b) => a.y - b.y || a.x - b.x);
+  // 每一行“所在栏”的右边缘：只看左边缘和它对齐的那些行（同一栏），
+  // 多栏版面里左栏的行就不会拿右栏的右边缘来判断是否写满。
+  const columnRight = (it) => {
+    let right = it.lineRight;
+    for (const other of items) {
+      if (Math.abs(other.x - it.x) < Math.max(it.h, other.h) && other.lineRight > right) {
+        right = other.lineRight;
+      }
+    }
+    return right;
+  };
 
   const paras = [];
-  let cur = null;
-  for (const it of items) {
-    if (!cur) {
-      cur = startPara(it);
+  const used = new Array(items.length).fill(false);
+
+  for (let i = 0; i < items.length; i++) {
+    if (used[i]) continue;
+    const it = items[i];
+    used[i] = true;
+    const cur = startPara(it);
+
+    // 为当前段落不断寻找“同栏且紧接在下方”的行。
+    let searching = true;
+    while (searching) {
+      searching = false;
+      const prev = cur.lines[cur.lines.length - 1];
+      let bestIdx = -1;
+      let bestGap = Infinity;
+      for (let j = 0; j < items.length; j++) {
+        if (used[j]) continue;
+        const cand = items[j];
+        if (cand.y < prev.y) continue; // 只找下方
+        const lineH = (prev.h + cand.h) / 2;
+        const gap = cand.y - (prev.y + prev.h);
+        if (gap >= lineH * 0.6) continue; // 纵向间距过大
+        if (gap < -prev.h * 0.5) continue; // 同一行的另一块，跳过
+        // 同一栏：左边缘接近，且横向有重叠。
+        const leftClose = Math.abs(cand.x - cur.x) < lineH * 1.0;
+        const overlap =
+          Math.min(cand.x + cand.w, cur.right) - Math.max(cand.x, cur.x) > 0;
+        if (!leftClose || !overlap) continue;
+        // 行高相近（标题/正文字号不同就分开）。
+        if (Math.abs(cand.h - prev.h) > Math.max(cand.h, prev.h) * 0.25) continue;
+        // 混排时中文片段和英文片段各自成段，避免英文被并进中文段落后不翻译。
+        if (cand.kind !== prev.kind) continue;
+        // 跨行续写只发生在“上一段写到行尾、下一段从行首开始”的地方。
+        if (!prev.lineEnd || !cand.lineStart) continue;
+        // 上一行必须“写满”：写到了它所在这一栏的右边缘附近（自动换行），
+        // 而不是短句、标题、按钮文字或列表项。
+        const colRight = columnRight(prev);
+        const colW = colRight - prev.x;
+        if (prev.lineRight < colRight - Math.max(lineH * 2, colW * 0.2)) continue;
+        if (gap < bestGap) {
+          bestGap = gap;
+          bestIdx = j;
+        }
+      }
+      if (bestIdx >= 0) {
+        const cand = items[bestIdx];
+        used[bestIdx] = true;
+        cur.lines.push(cand);
+        cur.x = Math.min(cur.x, cand.x);
+        cur.y = Math.min(cur.y, cand.y);
+        cur.right = Math.max(cur.right, cand.x + cand.w);
+        cur.bottom = Math.max(cur.bottom, cand.y + cand.h);
+        searching = true;
+      }
+    }
+    paras.push(finishPara(cur));
+  }
+  // 段落按阅读顺序返回。
+  paras.sort((a, b) => a.box.y - b.box.y || a.box.x - b.box.x);
+  return paras;
+}
+
+// 判断字符是否 CJK（含中日韩及常见全角标点）。
+const CJK_RE =
+  /[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef\uac00-\ud7a3]/;
+function isCjkChar(ch) {
+  return !!ch && CJK_RE.test(ch);
+}
+
+/* 把中英混排的一行按文字类别切成片段，每段带自己的行框。
+ * 例如「设置 Settings 已保存」切成「设置」「Settings」「已保存」，
+ * 这样只有英文片段会被翻译和覆盖，中文原样保留。
+ * 数字、空格、标点不决定类别，归到相邻的片段里；
+ * 每个字符的横向位置按字宽比例估算（与选字模型同一套算法）。 */
+function splitMixedLines(lines) {
+  const out = [];
+  octx.save();
+  for (const l of lines) {
+    if (!l || !l.box) continue;
+    const text = String(l.text || "");
+    if (text.trim() === "") continue;
+    const chars = Array.from(text);
+    const kinds = chars.map((ch) => (isCjkChar(ch) ? "cjk" : /\p{L}/u.test(ch) ? "latin" : null));
+    // 中性字符（数字/标点/空格）跟随前一个有类别的字符；行首的跟随后一个。
+    let last = null;
+    for (let i = 0; i < kinds.length; i++) {
+      if (kinds[i]) last = kinds[i];
+      else kinds[i] = last;
+    }
+    let next = null;
+    for (let i = kinds.length - 1; i >= 0; i--) {
+      if (kinds[i]) next = kinds[i];
+      else kinds[i] = next || "latin";
+    }
+    const firstKind = kinds[0];
+    const lineRight = l.box.x + l.box.width;
+    if (kinds.every((k) => k === firstKind)) {
+      out.push({ text, box: l.box, kind: firstKind, lineStart: true, lineEnd: true, lineRight });
       continue;
     }
-    const prev = cur.lines[cur.lines.length - 1];
-    const lineH = (prev.h + it.h) / 2;
-    const gap = it.y - (prev.y + prev.h);
-    const leftClose = Math.abs(it.x - cur.x) < Math.max(prev.h, it.h) * 1.2;
-    const heightClose = Math.abs(it.h - prev.h) < Math.max(prev.h, it.h) * 0.5;
-    if (gap < lineH * 0.8 && leftClose && heightClose) {
-      cur.lines.push(it);
-      cur.x = Math.min(cur.x, it.x);
-      cur.y = Math.min(cur.y, it.y);
-      cur.right = Math.max(cur.right, it.x + it.w);
-      cur.bottom = Math.max(cur.bottom, it.y + it.h);
-    } else {
-      paras.push(finishPara(cur));
-      cur = startPara(it);
+    octx.font = `${Math.max(8, l.box.height * 0.8)}px "Segoe UI","Microsoft YaHei",sans-serif`;
+    const widths = chars.map((ch) => octx.measureText(ch).width || 1);
+    const total = widths.reduce((s, w) => s + w, 0) || 1;
+    let start = 0;
+    let acc = 0;
+    for (let i = 1; i <= chars.length; i++) {
+      if (i < chars.length && kinds[i] === kinds[start]) continue;
+      const segW = widths.slice(start, i).reduce((s, w) => s + w, 0);
+      const piece = chars.slice(start, i).join("");
+      if (piece.trim() !== "") {
+        // 去掉片段两端空白对应的宽度，让行框贴住文字。
+        const lead = piece.length - piece.trimStart().length;
+        const trail = piece.length - piece.trimEnd().length;
+        const leadW = widths.slice(start, start + lead).reduce((s, w) => s + w, 0);
+        const trailW = widths.slice(i - trail, i).reduce((s, w) => s + w, 0);
+        const x0 = l.box.x + ((acc + leadW) / total) * l.box.width;
+        const x1 = l.box.x + ((acc + segW - trailW) / total) * l.box.width;
+        out.push({
+          text: piece.trim(),
+          box: { x: x0, y: l.box.y, width: Math.max(1, x1 - x0), height: l.box.height },
+          kind: kinds[start],
+          lineStart: start === 0,
+          lineEnd: i === chars.length,
+          lineRight,
+        });
+      }
+      acc += segW;
+      start = i;
     }
   }
-  if (cur) paras.push(finishPara(cur));
-  return paras;
+  octx.restore();
+  return out;
+}
+
+// 决定两行之间如何拼接：CJK-CJK 直接接；连字符换行去连字符接；否则空格。
+function joinLineText(prevText, nextText) {
+  const a = prevText.slice(-1);
+  const b = nextText.slice(0, 1);
+  if (/-$/.test(prevText) && /^[a-z]/.test(nextText)) {
+    return prevText.slice(0, -1) + nextText;
+  }
+  if (isCjkChar(a) && isCjkChar(b)) return prevText + nextText;
+  return prevText + " " + nextText;
 }
 
 function startPara(it) {
@@ -1855,24 +2103,37 @@ function finishPara(cur) {
     width: cur.right - cur.x,
     height: cur.bottom - cur.y,
   };
-  // CJK 直接拼接，拉丁文用空格。
-  const texts = cur.lines.map((l) => l.text);
-  const isCJK = /[\u3040-\u9fff\uac00-\ud7a3]/.test(texts.join(""));
-  const text = isCJK ? texts.join("") : texts.join(" ");
+  // 逐行边界拼接（修正 CJK/英文混排时的单词粘连）。
+  let text = cur.lines[0].text;
+  for (let i = 1; i < cur.lines.length; i++) {
+    text = joinLineText(text, cur.lines[i].text);
+  }
+  // 原文每行的行框（原图坐标），译文排版与背景填充按行走。
+  const rows = cur.lines.map((l) => ({ x: l.x, y: l.y, w: l.w, h: l.h }));
+  // 平均行距：相邻行 y 间距平均；单行用行框高度。
+  let lineStep;
+  if (rows.length > 1) {
+    let sum = 0;
+    for (let i = 1; i < rows.length; i++) sum += rows[i].y - rows[i - 1].y;
+    lineStep = sum / (rows.length - 1);
+  } else {
+    lineStep = rows[0].h;
+  }
   const lineH = cur.lines.reduce((s, l) => s + l.h, 0) / cur.lines.length;
-  return { box, text, lineH };
+  return { box, text, rows, lineStep, lineH };
 }
 
-/* 把译文绘制到 trans 画布（原图像素坐标）。 */
-function buildTransLayer(paragraphs, translations) {
+/* 把译文绘制到 trans 画布（原图像素坐标）。
+ * skipped[i] 为真的段落（已经是目标语言、没有文字、或翻译失败）不覆盖，原图保持不动。 */
+function buildTransLayer(paragraphs, translations, skipped = []) {
   transLayer = { paragraphs: [] };
   tctx.clearRect(0, 0, natW, natH);
-  // 需要从底图采样，先确保底图可读。
   const sctxData = sctx;
   for (let i = 0; i < paragraphs.length; i++) {
     const para = paragraphs[i];
+    if (skipped[i]) continue;
     const text = translations[i] != null ? String(translations[i]) : "";
-    if (text.trim() === "") continue;
+    if (text.trim() === "" || text.trim() === para.text.trim()) continue;
     const box = {
       x: Math.round(para.box.x),
       y: Math.round(para.box.y),
@@ -1880,7 +2141,7 @@ function buildTransLayer(paragraphs, translations) {
       height: Math.max(1, Math.round(para.box.height)),
     };
     const colors = sampleBoxColors(sctxData, box);
-    paintParagraph(box, text, para.lineH, colors);
+    paintParagraph(para, box, text, colors);
     transLayer.paragraphs.push({ box, text });
   }
 }
@@ -1952,53 +2213,87 @@ function rgb(c) {
   return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
 
-/* 在框内绘制背景色 + 自动换行 + 二分最大字号的译文。 */
-function paintParagraph(box, text, origLineH, colors) {
-  // 背景填充（略扩 2px）。
+/* 在段落框内绘制译文：
+ * - 先按每个原文行的行框（外扩 2px）填背景色；
+ * - 从框顶开始，用原文平均行距作为译文行距，第一行译文与第一行原文对齐；
+ * - 初始字号 ≈ 原文行框高 × 0.78，排不下再缩小（下限 10px）；左对齐、顶对齐。 */
+function paintParagraph(para, box, text, colors) {
   tctx.save();
+
+  // 1) 背景：逐个原文行填，只外扩 1px，避免盖住旁边保留的中文。
   tctx.fillStyle = rgb(colors.bg);
-  tctx.fillRect(box.x - 2, box.y - 2, box.width + 4, box.height + 4);
+  const rows = para.rows && para.rows.length ? para.rows : [{ x: box.x, y: box.y, w: box.width, h: box.height }];
+  for (const r of rows) {
+    tctx.fillRect(r.x - 1, r.y - 2, r.w + 2, r.h + 4);
+  }
 
-  const maxFont = Math.max(10, Math.min(box.height, (origLineH || box.height) * 0.9));
+  // 单行短片段（例如中英混排里的一个英文单词）的译文通常比原文宽：
+  // 不换行，按原文宽度缩小字号，实在放不下才略微超出。
+  const singleRow = rows.length === 1;
+  const availW = box.width - (singleRow ? 0 : 2);
+  const firstRowH = rows[0].h;
+  const lineStep = para.lineStep || firstRowH;
+  // 译文行距不小于字号的 1.15 倍，避免字号大时重叠。
+  const maxFont = Math.max(10, Math.min(firstRowH * 0.9, firstRowH * 0.78 + 2));
   const minFont = 10;
-  const fit = fitText(text, box.width - 4, box.height - 2, maxFont, minFont);
 
+  // 从初始字号往下找：能把译文排进（段落框高 + 行距容差）的最大字号。
+  const startFont = Math.max(minFont, Math.round(firstRowH * 0.78));
+  let chosen = null;
+  for (let font = Math.min(startFont, Math.round(maxFont)); font >= minFont; font--) {
+    const step = Math.max(lineStep, font * 1.15);
+    const lines = wrapText(text, availW, font);
+    const totalH = (lines.length - 1) * step + font * 1.2;
+    // 第一行顶部与原文第一行顶部对齐；最多比原文多出半行，避免盖住下方内容。
+    if (totalH <= box.height + step * 0.5 || font === minFont) {
+      chosen = { font, step, lines };
+      break;
+    }
+  }
+  if (!chosen) {
+    const lines = wrapText(text, availW, minFont);
+    chosen = { font: minFont, step: Math.max(lineStep, minFont * 1.15), lines };
+  }
+  if (singleRow && chosen.lines.length > 1) {
+    // 单行：改成一行显示，字号按宽度缩小（不低于 9px）。
+    tctx.save();
+    let font = Math.max(minFont, Math.round(firstRowH * 0.78));
+    tctx.font = `${font}px "Microsoft YaHei","Segoe UI",sans-serif`;
+    const w = tctx.measureText(text).width;
+    if (w > availW) font = Math.max(9, Math.floor((font * availW) / w));
+    tctx.restore();
+    chosen = { font, step: lineStep, lines: [text] };
+  }
+
+  // 2) 文字比原文宽、或行数多于原文时，补填多出的背景。
+  tctx.save();
+  tctx.font = `${chosen.font}px "Microsoft YaHei","Segoe UI",sans-serif`;
+  const textW = chosen.lines.reduce((m, ln) => Math.max(m, tctx.measureText(ln).width), 0);
+  tctx.restore();
+  if (textW > box.width) {
+    tctx.fillStyle = rgb(colors.bg);
+    tctx.fillRect(box.x + box.width, box.y - 2, textW - box.width + 2, rows[0].h + 4);
+  }
+  const need = (chosen.lines.length - 1) * chosen.step + chosen.font * 1.2;
+  const covered = box.height;
+  if (need > covered) {
+    tctx.fillStyle = rgb(colors.bg);
+    tctx.fillRect(box.x - 1, box.y + covered - 2, box.width + 2, need - covered + 4);
+  }
+
+  // 3) 文字。单行时在原文行框里垂直居中，和旁边保留的中文对齐。
   tctx.fillStyle = rgb(colors.fg);
-  tctx.textBaseline = "top";
-  tctx.font = `${fit.font}px "Microsoft YaHei","Segoe UI",sans-serif`;
-  let y = box.y + 1;
-  for (const ln of fit.lines) {
-    if (y + fit.lineH > box.y + box.height + fit.font) break;
-    tctx.fillText(ln, box.x + 1, y);
-    y += fit.lineH;
+  tctx.textBaseline = singleRow ? "middle" : "top";
+  tctx.font = `${chosen.font}px "Microsoft YaHei","Segoe UI",sans-serif`;
+  let y = singleRow ? rows[0].y + rows[0].h / 2 : box.y;
+  for (const ln of chosen.lines) {
+    tctx.fillText(ln, box.x, y);
+    y += chosen.step;
   }
   tctx.restore();
 }
 
-/* 二分查找能把 text 以自动换行排进 (maxW,maxH) 的最大字号。 */
-function fitText(text, maxW, maxH, maxFont, minFont) {
-  let lo = minFont, hi = Math.max(minFont, Math.floor(maxFont));
-  let bestLines = wrapText(text, maxW, lo);
-  let bestFont = lo;
-  let bestLineH = lo * 1.2;
-  while (lo <= hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    const lines = wrapText(text, maxW, mid);
-    const lineH = mid * 1.2;
-    const totalH = lines.length * lineH;
-    if (totalH <= maxH) {
-      bestFont = mid;
-      bestLines = lines;
-      bestLineH = lineH;
-      lo = mid + 1;
-    } else {
-      hi = mid - 1;
-    }
-  }
-  return { font: bestFont, lines: bestLines, lineH: bestLineH };
-}
-
-/* 按字号对 text 自动换行（CJK 逐字，拉丁按词）。 */
+/* 按字号对 text 自动换行；英文按词、中文按字，单个超宽 token 按字符断。 */
 function wrapText(text, maxW, font) {
   tctx.save();
   tctx.font = `${font}px "Microsoft YaHei","Segoe UI",sans-serif`;
@@ -2014,6 +2309,19 @@ function wrapText(text, maxW, font) {
       } else {
         cur = trial;
       }
+      // 单个 token 自身就超宽：按字符硬断。
+      if (tctx.measureText(cur).width > maxW && cur.length > 1) {
+        let chunk = "";
+        for (const ch of cur) {
+          if (chunk !== "" && tctx.measureText(chunk + ch).width > maxW) {
+            lines.push(chunk);
+            chunk = ch;
+          } else {
+            chunk += ch;
+          }
+        }
+        cur = chunk;
+      }
     }
     lines.push(cur);
   }
@@ -2025,7 +2333,7 @@ function tokenize(line) {
   const tokens = [];
   let buf = "";
   for (const ch of line) {
-    if (/[\u3040-\u9fff\uac00-\ud7a3]/.test(ch)) {
+    if (isCjkChar(ch)) {
       if (buf) { tokens.push(buf); buf = ""; }
       tokens.push(ch);
     } else if (ch === " ") {
@@ -2044,10 +2352,10 @@ function positionTransUi() {
   if (transToggle.hidden) return;
   if (!selection) return;
   if (transLayer && transLayer.info) {
+    // 目标语言已在下拉里显示，这里只标出自动识别的原文语言和翻译服务。
     const info = transLayer.info;
-    transLabel.textContent = info.provider
-      ? `${info.src} → ${info.dst} · ${info.provider}`
-      : `${info.src} → ${info.dst}`;
+    const src = LANG_LABELS[info.src] || info.src;
+    transLabel.textContent = info.provider ? `原文 ${src} · ${info.provider}` : `原文 ${src}`;
   }
   // 胶囊放在选区上方居中；空间不足放选区内顶部。
   const tW = transToggle.offsetWidth;
@@ -2064,10 +2372,7 @@ async function toggleOcr() {
   if (busy) return;
   // 已显示高亮 → 关闭。
   if (ocrLayout) {
-    ocrLayout = null;
-    ocrBoxes.innerHTML = "";
-    hidePanel();
-    syncToolbar();
+    exitOcrMode();
     return;
   }
   if (!selection) return;
@@ -2092,7 +2397,15 @@ async function toggleOcr() {
       return;
     }
     ocrLayout = { lines };
-    ocrText = (layout && layout.text) || lines.map((l) => l.text).join("\n");
+    buildOcrModel();
+    ocrText = ocrModel.fullText;
+    ocrSel = null;
+    root.dataset.ocr = "true";
+    // 与原位翻译互斥：隐藏译文层。
+    if (transVisible) {
+      transVisible = false;
+      trans.hidden = true;
+    }
     renderOcrBoxes();
     showOcrPanel(ocrText);
   } catch (err) {
@@ -2103,6 +2416,81 @@ async function toggleOcr() {
     setBtnBusy("ocr", false);
     syncToolbar();
   }
+}
+
+// 退出提取文字模式：清高亮、选择、面板、data-ocr。
+function exitOcrMode() {
+  ocrLayout = null;
+  ocrModel = null;
+  ocrSel = null;
+  ocrSelecting = false;
+  ocrBoxes.innerHTML = "";
+  root.dataset.ocr = "false";
+  if (typeof CSS !== "undefined" && CSS.highlights) CSS.highlights.delete("ocr-sel");
+  hidePanel();
+  syncToolbar();
+}
+
+/* 构建阅读顺序的行模型 + 每行字符矩形 + 全文字符偏移映射。 */
+function buildOcrModel() {
+  const sx = selection.x;
+  const sy = selection.y;
+  const lines = (ocrLayout.lines || [])
+    .filter((l) => l && l.box && String(l.text || "") !== "")
+    .map((l) => ({
+      text: String(l.text),
+      box: { x: l.box.x + sx, y: l.box.y + sy, width: l.box.width, height: l.box.height },
+    }))
+    // 阅读顺序：先 y 后 x。
+    .sort((a, b) => a.box.y - b.box.y || a.box.x - b.box.x);
+
+  octx.save();
+  let offset = 0;
+  const modelLines = [];
+  let fullText = "";
+  for (let li = 0; li < lines.length; li++) {
+    const ln = lines[li];
+    const text = ln.text;
+    // 用一个与行高匹配的字号度量字宽比例。
+    const fontPx = Math.max(8, ln.box.height * 0.8);
+    octx.font = `${fontPx}px "Segoe UI","Microsoft YaHei",sans-serif`;
+    const widths = [];
+    let total = 0;
+    for (const ch of text) {
+      const w = octx.measureText(ch).width || 1;
+      widths.push(w);
+      total += w;
+    }
+    if (total <= 0) total = 1;
+    // 字符矩形：按累计宽度比例分布在行 box 宽度内。
+    const chars = [];
+    let acc = 0;
+    const charArr = Array.from(text);
+    for (let i = 0; i < charArr.length; i++) {
+      const x0 = ln.box.x + (acc / total) * ln.box.width;
+      acc += widths[i];
+      const x1 = ln.box.x + (acc / total) * ln.box.width;
+      chars.push({ x: x0, w: Math.max(0.5, x1 - x0) });
+    }
+    const startOffset = offset;
+    fullText += text;
+    offset += charArr.length;
+    modelLines.push({
+      text,
+      box: ln.box,
+      chars,
+      startOffset,
+      len: charArr.length,
+      y0: ln.box.y,
+      y1: ln.box.y + ln.box.height,
+    });
+    if (li < lines.length - 1) {
+      fullText += "\n";
+      offset += 1; // 行间 \n 占一个偏移
+    }
+  }
+  octx.restore();
+  ocrModel = { lines: modelLines, fullText };
 }
 
 async function runOcrTextOnly() {
@@ -2127,35 +2515,159 @@ async function runOcrTextOnly() {
   }
 }
 
-/* 把每行用半透明蓝色框画到 overlay（CSS 定位，随视图变换）。 */
+/* 画 overlay：每行一个很淡的行框提示 + 选中部分的高亮矩形。 */
 function renderOcrBoxes() {
   ocrBoxes.innerHTML = "";
-  if (!ocrLayout) return;
-  const sx = selection.x;
-  const sy = selection.y;
-  ocrLayout.lines.forEach((ln) => {
-    if (!ln.box) return;
-    const ix = ln.box.x + sx;
-    const iy = ln.box.y + sy;
+  if (!ocrModel) return;
+  // 行框提示。
+  for (const ln of ocrModel.lines) {
     const el = document.createElement("div");
     el.className = "ocr-box";
-    el.style.left = `${vx(ix)}px`;
-    el.style.top = `${vy(iy)}px`;
+    el.style.left = `${vx(ln.box.x)}px`;
+    el.style.top = `${vy(ln.box.y)}px`;
     el.style.width = `${ln.box.width * view.sx}px`;
     el.style.height = `${ln.box.height * view.sy}px`;
-    el.title = ln.text;
-    el.addEventListener("pointerdown", (e) => e.stopPropagation());
-    el.addEventListener("click", async () => {
-      try {
-        if (typeof api.copyText === "function") await api.copyText(ln.text);
-        else if (navigator.clipboard) await navigator.clipboard.writeText(ln.text);
-        showToast("已复制");
-      } catch (err) {
-        showToast("复制失败：" + messageOf(err));
-      }
-    });
     ocrBoxes.appendChild(el);
-  });
+  }
+  renderOcrSelection();
+}
+
+/* 选中高亮：把全局偏移范围映射回每行，画蓝色矩形。 */
+function renderOcrSelection() {
+  // 移除旧的高亮矩形。
+  for (const el of ocrBoxes.querySelectorAll(".ocr-sel")) el.remove();
+  if (!ocrModel || !ocrSel) return;
+  const lo = Math.min(ocrSel.anchor, ocrSel.focus);
+  const hi = Math.max(ocrSel.anchor, ocrSel.focus);
+  if (hi <= lo) return;
+  for (const ln of ocrModel.lines) {
+    const ls = ln.startOffset;
+    const le = ln.startOffset + ln.len;
+    const from = Math.max(lo, ls);
+    const to = Math.min(hi, le);
+    if (to <= from) continue;
+    const ci0 = from - ls;
+    const ci1 = to - ls;
+    const x0 = ln.chars[ci0] ? ln.chars[ci0].x : ln.box.x;
+    const last = ln.chars[ci1 - 1];
+    const x1 = last ? last.x + last.w : ln.box.x + ln.box.width;
+    const el = document.createElement("div");
+    el.className = "ocr-sel";
+    el.style.left = `${vx(x0)}px`;
+    el.style.top = `${vy(ln.box.y)}px`;
+    el.style.width = `${(x1 - x0) * view.sx}px`;
+    el.style.height = `${ln.box.height * view.sy}px`;
+    ocrBoxes.appendChild(el);
+  }
+}
+
+/* 图片坐标 → 最近的全局字符偏移（用于拖动选字）。 */
+function pointToOffset(p) {
+  if (!ocrModel || ocrModel.lines.length === 0) return 0;
+  // 1) 找纵向包含该点的行，否则取最近的行。
+  let line = null;
+  let bestDy = Infinity;
+  for (const ln of ocrModel.lines) {
+    if (p.y >= ln.y0 && p.y <= ln.y1) { line = ln; break; }
+    const dy = p.y < ln.y0 ? ln.y0 - p.y : p.y - ln.y1;
+    if (dy < bestDy) { bestDy = dy; line = ln; }
+  }
+  if (!line) return 0;
+  // 2) 行内找最近的字符边界。
+  if (p.x <= line.box.x) return line.startOffset;
+  if (p.x >= line.box.x + line.box.width) return line.startOffset + line.len;
+  for (let i = 0; i < line.chars.length; i++) {
+    const c = line.chars[i];
+    const mid = c.x + c.w / 2;
+    if (p.x < mid) return line.startOffset + i;
+  }
+  return line.startOffset + line.len;
+}
+
+/* 单击选中整行。 */
+function offsetLineRange(p) {
+  if (!ocrModel) return null;
+  for (const ln of ocrModel.lines) {
+    if (p.y >= ln.y0 && p.y <= ln.y1) {
+      return { anchor: ln.startOffset, focus: ln.startOffset + ln.len };
+    }
+  }
+  return null;
+}
+
+/* 取当前选中的全文子串（跨行含 \n）。 */
+function ocrSelectedText() {
+  if (!ocrModel || !ocrSel) return "";
+  const lo = Math.min(ocrSel.anchor, ocrSel.focus);
+  const hi = Math.max(ocrSel.anchor, ocrSel.focus);
+  if (hi <= lo) return "";
+  return Array.from(ocrModel.fullText).slice(lo, hi).join("");
+}
+
+/* 图上的选择 → 同步到面板：原生选区 + CSS Highlight + 滚动可见。 */
+function syncSelectionToPanel() {
+  if (!ocrModel || panel.hidden) return;
+  const node = panelText.firstChild;
+  if (!node || node.nodeType !== Node.TEXT_NODE) return;
+  const maxLen = node.textContent.length;
+  suppressPanelSelSync = true;
+  try {
+    if (!ocrSel) {
+      if (typeof CSS !== "undefined" && CSS.highlights) CSS.highlights.delete("ocr-sel");
+      const s = window.getSelection();
+      if (s && panelText.contains(s.anchorNode)) s.removeAllRanges();
+      return;
+    }
+    const lo = clamp(Math.min(ocrSel.anchor, ocrSel.focus), 0, maxLen);
+    const hi = clamp(Math.max(ocrSel.anchor, ocrSel.focus), 0, maxLen);
+    const range = document.createRange();
+    range.setStart(node, lo);
+    range.setEnd(node, hi);
+    // CSS Custom Highlight（不抢焦点）。
+    if (typeof Highlight !== "undefined" && CSS.highlights) {
+      CSS.highlights.set("ocr-sel", new Highlight(range));
+    }
+    // 滚动到可见。
+    const rects = range.getClientRects();
+    if (rects.length) {
+      const r = rects[0];
+      const pr = panelText.getBoundingClientRect();
+      if (r.top < pr.top || r.bottom > pr.bottom) {
+        panelText.scrollTop += r.top - pr.top - pr.height / 2;
+      }
+    }
+  } finally {
+    suppressPanelSelSync = false;
+  }
+}
+
+/* 面板原生选择 → 同步到图上高亮。 */
+function onPanelSelectionChange() {
+  if (suppressPanelSelSync) return;
+  if (!ocrModel || panel.hidden) return;
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
+  const node = panelText.firstChild;
+  if (!node) return;
+  if (!panelText.contains(sel.anchorNode) || !panelText.contains(sel.focusNode)) return;
+  if (sel.isCollapsed) {
+    ocrSel = null;
+    renderOcrSelection();
+    if (typeof CSS !== "undefined" && CSS.highlights) CSS.highlights.delete("ocr-sel");
+    return;
+  }
+  const range = sel.getRangeAt(0);
+  // 计算相对 panelText 文本节点的偏移。
+  let a = range.startOffset;
+  let b = range.endOffset;
+  if (range.startContainer !== node) a = 0;
+  if (range.endContainer !== node) b = node.textContent.length;
+  ocrSel = { anchor: a, focus: b };
+  renderOcrSelection();
+  // 同步 CSS highlight（让 ::highlight 也标出来，和原生选区重合无妨）。
+  if (typeof Highlight !== "undefined" && CSS.highlights) {
+    CSS.highlights.set("ocr-sel", new Highlight(range.cloneRange()));
+  }
 }
 function startLong() {
   if (longMode || !selection) return;
@@ -2169,8 +2681,7 @@ function startLong() {
   selectedIndex = -1;
   root.dataset.toolActive = "false";
   hidePanel();
-  ocrLayout = null;
-  ocrBoxes.innerHTML = "";
+  if (ocrLayout || ocrModel) exitOcrMode();
   clearTranslation();
   buildSubbar();
   render();
@@ -2205,8 +2716,7 @@ function enterLongMode(result) {
   selectedIndex = -1;
   activeTool = null;
   clearTranslation();
-  ocrLayout = null;
-  ocrBoxes.innerHTML = "";
+  if (ocrLayout || ocrModel) exitOcrMode();
   hidePanel();
 
   longMode = true;
@@ -2266,6 +2776,7 @@ function showPanelLoading(title, text) {
   panelLoading.hidden = false;
   panelSourceWrap.hidden = true;
   panelText.hidden = true;
+  panelTransWrap.hidden = true;
   panelFoot.hidden = true;
 }
 
@@ -2274,7 +2785,8 @@ function showPanelError(msg) {
   panelSourceWrap.hidden = true;
   panelText.hidden = false;
   panelFoot.hidden = true;
-  panelText.value = msg;
+  panelTransWrap.hidden = true;
+  panelText.textContent = msg;
 }
 
 function showOcrPanel(text) {
@@ -2286,8 +2798,13 @@ function showOcrPanel(text) {
   panelSourceWrap.hidden = true;
   panelTextLabel.textContent = "识别结果";
   panelText.hidden = false;
-  panelText.value = text || "";
+  panelText.textContent = text || "";
+  panelTransWrap.hidden = true;
+  panelTrans.textContent = "";
+  panelTransText = null;
   panelFoot.hidden = false;
+  // 只有有布局模型时才显示「翻译」按钮。
+  document.getElementById("panelTranslate").hidden = !ocrModel;
 }
 
 function hidePanel() {
@@ -2295,21 +2812,83 @@ function hidePanel() {
   currentPanel = null;
 }
 
+// 获取面板原文里当前选中的纯文本（无选中返回空串）。
+function panelSelectedText() {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return "";
+  if (!panelText.contains(sel.anchorNode) || !panelText.contains(sel.focusNode)) return "";
+  return sel.toString();
+}
+
+async function copyToClipboard(text) {
+  if (api && typeof api.copyText === "function") {
+    await api.copyText(text);
+  } else if (navigator.clipboard && navigator.clipboard.writeText) {
+    await navigator.clipboard.writeText(text);
+  } else {
+    throw new Error("clipboard unavailable");
+  }
+}
+
 async function copyPanel() {
-  const text = panelText.value;
+  // 有选中则只复制选中，否则复制全部。
+  const sel = panelSelectedText();
+  const text = sel || panelText.textContent || "";
   try {
-    if (api && typeof api.copyText === "function") {
-      await api.copyText(text);
-    } else if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      panelText.focus();
-      panelText.select();
-      document.execCommand("copy");
-    }
+    await copyToClipboard(text);
     showToast("已复制");
   } catch (err) {
     showToast("复制失败：" + messageOf(err));
+  }
+}
+
+async function copyPanelTrans() {
+  const text = panelTrans.textContent || "";
+  if (!text) return;
+  try {
+    await copyToClipboard(text);
+    showToast("已复制译文");
+  } catch (err) {
+    showToast("复制失败：" + messageOf(err));
+  }
+}
+
+// 面板底部「翻译」：按段落合并规则翻译识别结果，显示在原文下方。
+async function translatePanel() {
+  if (busy || !ocrModel) return;
+  if (typeof api.translateBatch !== "function") {
+    showToast("当前版本不支持翻译");
+    return;
+  }
+  const btn = document.getElementById("panelTranslate");
+  const version = selectionVersion;
+  // 用与原位翻译相同的段落合并（需要 ocrLayout.lines）。
+  const paras = ocrLayout && ocrLayout.lines ? mergeLines(ocrLayout.lines) : [];
+  if (paras.length === 0) return;
+  busy = true;
+  btn.disabled = true;
+  panelTargetSelect.disabled = true;
+  btn.textContent = "翻译中…";
+  const target = transTargetLang;
+  try {
+    const res = await api.translateBatch(paras.map((p) => p.text), target);
+    if (version !== selectionVersion || target !== transTargetLang) return;
+    const translations = (res && res.translations) || [];
+    const skipped = (res && res.skipped) || [];
+    // 面板译文：已经是目标语言的段落原样列出，保持和原文一一对应。
+    panelTransText = paras
+      .map((p, i) => (skipped[i] ? p.text : translations[i] || p.text))
+      .join("\n\n");
+    panelTrans.textContent = panelTransText;
+    panelTransWrap.hidden = false;
+  } catch (err) {
+    if (version !== selectionVersion) return;
+    showToast("翻译失败：" + messageOf(err));
+  } finally {
+    busy = false;
+    btn.disabled = false;
+    panelTargetSelect.disabled = false;
+    btn.textContent = "翻译";
   }
 }
 
@@ -2337,7 +2916,8 @@ function showToast(msg) {
 /* --------------------------- 键盘 --------------------------- */
 
 window.addEventListener("keydown", async (e) => {
-  const inField = e.target === panelText || e.target === textEditor;
+  const inField =
+    e.target === textEditor || (e.target instanceof Element && e.target.matches(".lang-select"));
 
   if (e.key === "Escape") {
     if (!textEditor.hidden) {
@@ -2350,6 +2930,21 @@ window.addEventListener("keydown", async (e) => {
       selectedIndex = -1;
       annoDirty = true;
       render();
+      return;
+    }
+    // 提取文字：先清文字选择，再退出提取模式，再关闭。
+    if (ocrModel && ocrSel) {
+      e.preventDefault();
+      ocrSel = null;
+      renderOcrSelection();
+      if (typeof CSS !== "undefined" && CSS.highlights) CSS.highlights.delete("ocr-sel");
+      const s = window.getSelection();
+      if (s && panelText.contains(s.anchorNode)) s.removeAllRanges();
+      return;
+    }
+    if (ocrModel) {
+      e.preventDefault();
+      exitOcrMode();
       return;
     }
     e.preventDefault();
@@ -2388,6 +2983,19 @@ window.addEventListener("keydown", async (e) => {
   }
   if ((e.ctrlKey || e.metaKey) && (e.key === "c" || e.key === "C")) {
     e.preventDefault();
+    // 提取文字模式：有选中文字就复制文字。
+    if (ocrModel) {
+      const t = panelSelectedText() || ocrSelectedText();
+      if (t) {
+        try {
+          await copyToClipboard(t);
+          showToast("已复制");
+        } catch (err) {
+          showToast("复制失败：" + messageOf(err));
+        }
+        return;
+      }
+    }
     if (selection) doCopy();
     return;
   }

@@ -28,6 +28,9 @@ interface OcrLayoutResult {
 
 interface TranslateBatchResult {
   translations: string[];
+  // True where the segment was left as is (already the target language, no
+  // letters, or its translation failed).
+  skipped: boolean[];
   sourceLanguage: string;
   targetLanguage: string;
   provider: string;
@@ -78,8 +81,8 @@ contextBridge.exposeInMainWorld("screenshot", {
     ipcRenderer.invoke("screenshot:ocr-layout", dataUrl),
   translate: (text: string): Promise<TranslationResult> =>
     ipcRenderer.invoke("screenshot:translate", text),
-  translateBatch: (texts: string[]): Promise<TranslateBatchResult> =>
-    ipcRenderer.invoke("screenshot:translate-batch", texts),
+  translateBatch: (texts: string[], target?: string): Promise<TranslateBatchResult> =>
+    ipcRenderer.invoke("screenshot:translate-batch", texts, target),
   pin: (payload: PinPayload): Promise<boolean> =>
     ipcRenderer.invoke("screenshot:pin", payload),
   longStart: (rect: LongRect): void => ipcRenderer.send("screenshot:long-start", rect),

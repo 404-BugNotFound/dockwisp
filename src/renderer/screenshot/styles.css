@@ -472,17 +472,25 @@ body {
   pointer-events: none;
   z-index: 15;
 }
+/* 行框提示：很淡，仅示意可选区域 */
 .ocr-box {
   position: absolute;
-  background: rgba(45, 125, 246, 0.22);
-  border: 1px solid rgba(45, 125, 246, 0.7);
+  background: rgba(45, 125, 246, 0.06);
+  border: 1px solid rgba(45, 125, 246, 0.18);
   border-radius: 2px;
-  cursor: pointer;
-  pointer-events: auto;
-  transition: background 0.1s ease;
+  pointer-events: none;
 }
-.ocr-box:hover {
-  background: rgba(45, 125, 246, 0.36);
+/* 选中部分的高亮矩形（每行一块） */
+.ocr-sel {
+  position: absolute;
+  background: rgba(45, 125, 246, 0.32);
+  border-radius: 1px;
+  pointer-events: none;
+}
+/* 提取文字模式下，选区内显示文本光标 */
+#root[data-ocr="true"][data-mode="idle"],
+#root[data-ocr="true"] #selection {
+  cursor: text;
 }
 
 /* ---------------- 翻译加载态 ---------------- */
@@ -544,6 +552,34 @@ body {
 #transToggle .seg button[aria-pressed="true"] {
   background: var(--wx-green);
   color: #fff;
+}
+
+/* 目标语言下拉（原位翻译胶囊 + 提取文字面板共用） */
+.lang-select {
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid #e0e2e5;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--icon);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  outline: none;
+}
+.lang-select:hover {
+  background: var(--tb-hover);
+}
+.lang-select:focus-visible {
+  border-color: var(--wx-green);
+}
+.lang-select:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.panel-lang {
+  height: 30px;
+  border-radius: 8px;
 }
 
 /* ---------------- 文字标注输入框 ---------------- */
@@ -691,12 +727,13 @@ body {
   -webkit-user-select: text;
   user-select: text;
 }
-#panelText {
+#panelText,
+#panelTrans {
   width: 100%;
-  min-height: 150px;
-  max-height: 320px;
+  min-height: 90px;
+  max-height: 300px;
   padding: 10px;
-  resize: vertical;
+  overflow-y: auto;
   font: inherit;
   font-size: 12.5px;
   line-height: 1.6;
@@ -705,11 +742,39 @@ body {
   border: 1px solid #eef0f2;
   border-radius: 8px;
   outline: none;
+  white-space: pre-wrap;
+  word-break: break-word;
   -webkit-user-select: text;
   user-select: text;
+  cursor: text;
 }
-#panelText:focus {
+.panel-text:focus {
   border-color: var(--wx-green);
+}
+/* 面板里与图上联动的高亮（CSS Custom Highlight API） */
+::highlight(ocr-sel) {
+  background: rgba(45, 125, 246, 0.3);
+}
+
+#panelTransWrap {
+  margin-top: 12px;
+}
+.panel-trans-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.panel-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--wx-green);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.panel-link:hover {
+  text-decoration: underline;
 }
 
 .panel-foot {

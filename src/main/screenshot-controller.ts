@@ -13,7 +13,7 @@ import { appendFile, mkdir, rename, stat, unlink, writeFile } from "node:fs/prom
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { translateText } from "../translation/providers";
-import { detectLanguagePair } from "../translation/language";
+import { detectLanguage } from "../translation/language";
 import { MouseHelper } from "./mouse-helper";
 import { ocrResizeDimensions, recognizeImageFile, recognizeImageLayout, warmupOcr } from "./ocr";
 import { SettingsStore } from "./settings";
@@ -51,6 +51,8 @@ const PAINT_TIMEOUT_MS = 250;
 // Hotkey triggers closer together than this are keyboard auto-repeat from a
 // held key. Covers the Windows repeat delay (250–1000ms, default ~500ms).
 const HOTKEY_REPEAT_GAP_MS = 1_100;
+// Target languages the screenshot translate picker may request.
+const SCREENSHOT_TARGETS = new Set(["zh-CN", "en", "ja", "ko"]);
 
 /** A position to the right of every display, so a shown window is not visible. */
 function offscreenOrigin(): { x: number; y: number } {
@@ -627,10 +629,15 @@ export class ScreenshotController {
       }
     });
 
-    ipcMain.handle("screenshot:translate-batch", async (event, texts: unknown) => {
-      if (!this.fromOverlay(event)) throw new Error("请求来源无效");
-      return this.translateBatch(Array.isArray(texts) ? texts : []);
-    });
+    ipcMain.handle(
+      "screenshot:translate-batch",
+      async (event, texts: unknown, target: unknown) => {
+        if (!this.fromOverlay(event)) throw new Error("请求来源无效");
+        const code =
+          typeof target === "string" && SCREENSHOT_TARGETS.has(target) ? target : "zh-CN";
+        return this.translateBatch(Array.isArray(texts) ? texts : [], code);
+      },
+    );
 
     ipcMain.handle("screenshot:pin", async (event, payload: unknown) => {
       if (!this.fromOverlay(event)) return false;
@@ -668,16 +675,20 @@ export class ScreenshotController {
   }
 
   /**
-   * Translate several texts at once for the layout-OCR overlay. The language
-   * pair is detected once over all texts joined, then forced on every segment
-   * so the direction is identical for each line (matching the legacy whole-text
-   * behaviour: Chinese→English, everything else→Chinese). Empty strings pass
-   * through untouched; a segment that fails to translate falls back to its
-   * original text, and only a total failure throws. Concurrency is capped at 3
-   * and the output is index-aligned with the input.
+   * Translate several texts at once for the layout-OCR overlay into `target`
+   * (default 简体中文). Each segment's language is detected on its own, so a
+   * screenshot mixing Chinese and English translates only the English parts.
+   * Segments already in the target language, or without any letters (numbers,
+   * symbols), are skipped: they come back unchanged with `skipped[i]` set and
+   * cost no network request. A segment that fails to translate also falls back
+   * to its original text, and only a total failure throws. Concurrency is
+   * capped at 3 and the output is index-aligned with the input.
+   * `sourceLanguage` is the language of the translated segments, or "mixed"
+   * when they differ, or "none" when every segment was skipped.
    */
-  private async translateBatch(texts: unknown[]): Promise<{
+  private async translateBatch(texts: unknown[], target: string): Promise<{
     translations: string[];
+    skipped: boolean[];
     sourceLanguage: string;
     targetLanguage: string;
     provider: string;
@@ -685,10 +696,14 @@ export class ScreenshotController {
     const inputs = texts.map((item) => (typeof item === "string" ? item : ""));
     const translation = this.settings.get().translation;
     const providerName = translation.provider === "libretranslate" ? "LibreTranslate" : "MyMemory";
-    const pair = detectLanguagePair(inputs.join("\n"));
 
-    const translations = new Array<string>(inputs.length).fill("");
-    const indices = inputs.map((_, index) => index).filter((index) => inputs[index].trim() !== "");
+    const sources = inputs.map((text) => (/\p{L}/u.test(text) ? detectLanguage(text) : null));
+    const skipped = sources.map((source) => source === null || source === target);
+    const translations = inputs.slice();
+    const indices = inputs.map((_, index) => index).filter((index) => !skipped[index]);
+    const usedSources = new Set(indices.map((index) => sources[index] as string));
+    const sourceLanguage =
+      usedSources.size === 0 ? "none" : usedSources.size === 1 ? [...usedSources][0] : "mixed";
     let anySuccess = false;
     let firstError: Error | null = null;
 
@@ -704,13 +719,13 @@ export class ScreenshotController {
             provider: translation.provider,
             endpoint: translation.endpoint,
             apiKey: translation.apiKey,
-            source: pair.source,
-            target: pair.target,
+            source: sources[index] as string,
+            target,
           });
           translations[index] = result.translatedText;
           anySuccess = true;
         } catch (error) {
-          translations[index] = text;
+          skipped[index] = true;
           if (!firstError) firstError = error instanceof Error ? error : new Error(String(error));
         }
       }
@@ -720,8 +735,9 @@ export class ScreenshotController {
     if (indices.length > 0 && !anySuccess && firstError) throw firstError;
     return {
       translations,
-      sourceLanguage: pair.source,
-      targetLanguage: pair.target,
+      skipped,
+      sourceLanguage,
+      targetLanguage: target,
       provider: providerName,
     };
   }
