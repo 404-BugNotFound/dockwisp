@@ -1075,6 +1075,23 @@ async function appIconUrl(filePath: string): Promise<string | undefined> {
     if (path.extname(filePath).toLowerCase() === ".lnk") {
       try {
         const shortcut = shell.readShortcutLink(filePath);
+        // app.getFileIcon on an .ico/.png returns the blank file-type page
+        // (seen with Feishu's icon.ico); load such icon files directly.
+        if (
+          shortcut.icon &&
+          IMAGE_ICON_EXTENSIONS.has(path.extname(shortcut.icon).toLowerCase()) &&
+          existsSync(shortcut.icon)
+        ) {
+          let image = nativeImage.createFromPath(shortcut.icon);
+          if (!image.isEmpty()) {
+            if (image.getSize().width > 64) {
+              image = image.resize({ width: 64, height: 64, quality: "best" });
+            }
+            const url = image.toDataURL();
+            iconCache.set(filePath, url);
+            return url;
+          }
+        }
         if (shortcut.icon && existsSync(shortcut.icon)) {
           iconSource = shortcut.icon;
           iconIndex = shortcut.iconIndex ?? 0;
