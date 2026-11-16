@@ -96,6 +96,8 @@ let homeMatches = [];
 let selected = 0;
 let searchToken = 0;
 let lastResizeHeight = 0;
+let menuExpanded = false;
+const MAX_WINDOW_HEIGHT = 700; // matches the clamp in the launcher:resize handler
 let contextTarget = null;
 let toastTimer = null;
 let hasSearched = false;
@@ -365,6 +367,8 @@ function desiredHeight() {
 }
 
 function applyResize() {
+  // While the context menu holds the window taller, defer; closing it resizes.
+  if (menuExpanded) return;
   const height = desiredHeight();
   if (height === lastResizeHeight) return;
   lastResizeHeight = height;
@@ -876,16 +880,50 @@ function openContextMenu(match, x, y) {
     contextMenu.append(button);
   });
   contextMenu.hidden = false;
+  const margin = 6;
   const menuRect = contextMenu.getBoundingClientRect();
-  const maxX = window.innerWidth - menuRect.width - 6;
-  const maxY = window.innerHeight - menuRect.height - 6;
-  contextMenu.style.left = `${Math.max(6, Math.min(x, maxX))}px`;
-  contextMenu.style.top = `${Math.max(6, Math.min(y, maxY))}px`;
+  const maxX = window.innerWidth - menuRect.width - margin;
+  let top = y;
+  const needed = Math.ceil(y + menuRect.height + margin);
+  if (needed > window.innerHeight) {
+    // The window is only as tall as the result list, so a short list clips the
+    // menu. Grow the transparent window below the panel, without moving it:
+    // limit the growth to the space left above the bottom of the work area.
+    const room = Math.floor(screen.availTop + screen.availHeight - window.screenY);
+    const limit = Math.min(room, MAX_WINDOW_HEIGHT);
+    if (needed <= limit) {
+      expandForMenu(needed);
+    } else if (y - menuRect.height >= margin) {
+      top = y - menuRect.height; // Near the screen bottom: open upward.
+    } else {
+      const height = Math.max(window.innerHeight, limit);
+      expandForMenu(height);
+      top = Math.max(margin, height - menuRect.height - margin);
+    }
+  } else {
+    top = Math.max(margin, Math.min(y, window.innerHeight - menuRect.height - margin));
+  }
+  contextMenu.style.left = `${Math.max(margin, Math.min(x, maxX))}px`;
+  contextMenu.style.top = `${top}px`;
+}
+
+function expandForMenu(height) {
+  if (height <= window.innerHeight) return;
+  // Pin the panel to its current height so only the transparent area grows.
+  if (!menuExpanded) launcher.style.height = `${window.innerHeight}px`;
+  menuExpanded = true;
+  api.resize(height);
 }
 
 function closeContextMenu() {
   contextMenu.hidden = true;
   contextTarget = null;
+  if (menuExpanded) {
+    menuExpanded = false;
+    launcher.style.height = "";
+    lastResizeHeight = 0;
+    applyResize();
+  }
 }
 
 document.addEventListener("mousedown", (event) => {
