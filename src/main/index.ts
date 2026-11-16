@@ -2381,14 +2381,34 @@ void app.whenReady().then(async () => {
           if (match.kind !== "app" || ![".exe", ".lnk", ".appref-ms"].includes(extension)) {
             return { ok: false, message: "仅支持以管理员身份运行应用" };
           }
-          const escaped = original.replace(/'/g, "''");
-          spawnDetached("powershell.exe", [
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            `Start-Process -FilePath '${escaped}' -Verb RunAs`,
-          ]);
-          return { ok: true, hide: true };
+          // Must not be spawned detached: a console-less (DETACHED_PROCESS)
+          // PowerShell makes Start-Process -Verb RunAs silently do nothing.
+          // The path goes through the environment to avoid quoting issues.
+          const script =
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " +
+            "$ErrorActionPreference='Stop'; try { " +
+            "Start-Process -FilePath $env:DW_RUNAS_TARGET -Verb RunAs; exit 0 } " +
+            "catch { if ($_.Exception.InnerException.NativeErrorCode -eq 1223 -or " +
+            "$_.Exception.NativeErrorCode -eq 1223) { exit 1223 }; " +
+            "[Console]::Error.Write($_.Exception.Message); exit 1 }";
+          const result = await new Promise<{ code: number | null; stderr: string }>((resolve) => {
+            const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+              windowsHide: true,
+              env: { ...process.env, DW_RUNAS_TARGET: original },
+            });
+            let stderr = "";
+            child.stderr.on("data", (chunk) => {
+              stderr += String(chunk);
+            });
+            child.on("error", (error) => resolve({ code: -1, stderr: error.message }));
+            child.on("close", (code) => resolve({ code, stderr }));
+          });
+          if (result.code === 0) return { ok: true, hide: true };
+          if (result.code === 1223) return { ok: false, message: "已取消管理员授权" };
+          return {
+            ok: false,
+            message: `以管理员身份运行失败：${result.stderr.trim() || `退出码 ${result.code}`}`,
+          };
         }
         return { ok: false, message: "未知操作" };
       } catch (error) {
