@@ -1206,7 +1206,6 @@ function showHubPage(page = "settings") {
   }
   document.querySelector("#page-settings").hidden = next !== "settings";
   document.querySelector("#page-plugins").hidden = next !== "plugins";
-  document.querySelector("#save-settings").hidden = next !== "settings";
   if (next === "plugins") void loadPlugins();
 }
 
@@ -1466,37 +1465,67 @@ document.querySelector("#open-settings").addEventListener("click", () => {
 
 document.querySelector("#settings-back").addEventListener("click", closeSettings);
 
-document.querySelector("#save-settings").addEventListener("click", async () => {
-  const processBlacklist = document
-    .querySelector("#process-blacklist")
-    .value.split(/\r?\n/)
-    .map((item) => item.trim())
-    .filter(Boolean);
+/* ---------- settings: every field applies as soon as it changes ---------- */
+function updateHotkeyBadges(saved) {
+  const hotkeyState = document.querySelector("#hotkey-state");
+  hotkeyState.textContent = saved.registeredHotkey
+    ? `快捷键已启用 · ${saved.registeredHotkey}`
+    : "快捷键注册失败";
+  hotkeyState.className = `health-badge ${saved.registeredHotkey ? "ok" : "warn"}`;
+  const screenshotHotkeyState = document.querySelector("#screenshot-hotkey-state");
+  screenshotHotkeyState.textContent = saved.registeredScreenshotHotkey
+    ? `截图快捷键已启用 · ${saved.registeredScreenshotHotkey}`
+    : "截图快捷键注册失败";
+  screenshotHotkeyState.className = `health-badge ${saved.registeredScreenshotHotkey ? "ok" : "warn"}`;
+}
+
+async function applySettingChange(patch) {
+  const status = document.querySelector("#settings-status");
   try {
-    const saved = await api.updateSettings({
-      hotkey: document.querySelector("#hotkey").value,
-      screenshotHotkey: document.querySelector("#screenshot-hotkey").value,
-      windowDragEnabled,
-      panelTransparency: normalizePanelTransparency(
-        document.querySelector("#panel-transparency").value,
-      ),
-      longPressMs: Number(document.querySelector("#long-press").value),
-      translationEnabled: document.querySelector("#translation-enabled").checked,
-      launchAtLogin: document.querySelector("#launch-at-login").checked,
-      processBlacklist,
-      translation: {
-        provider: document.querySelector("#translation-provider").value,
-        endpoint: document.querySelector("#translation-endpoint").value,
-        apiKey: document.querySelector("#translation-key").value,
-      },
-    });
-    await openSettings();
-    document.querySelector("#settings-status").textContent =
-      `已保存。启动快捷键：${saved.registeredHotkey || "注册失败"} · 截图快捷键：${saved.registeredScreenshotHotkey || "注册失败"}`;
+    const saved = await api.updateSettings(patch);
+    updateHotkeyBadges(saved);
+    // Show the normalized value (trimmed, clamped) the store actually kept.
+    document.querySelector("#hotkey").value = saved.hotkey;
+    document.querySelector("#screenshot-hotkey").value = saved.screenshotHotkey || "";
+    document.querySelector("#long-press").value = saved.longPressMs;
+    document.querySelector("#launch-at-login").checked = saved.launchAtLogin;
+    document.querySelector("#translation-enabled").checked = saved.translationEnabled;
+    status.textContent = "已自动保存";
   } catch (error) {
-    document.querySelector("#settings-status").textContent = error.message || String(error);
+    status.textContent = error.message || String(error);
   }
-});
+}
+
+const settingFields = [
+  ["#hotkey", (el) => ({ hotkey: el.value })],
+  ["#screenshot-hotkey", (el) => ({ screenshotHotkey: el.value })],
+  ["#launch-at-login", (el) => ({ launchAtLogin: el.checked })],
+  ["#translation-enabled", (el) => ({ translationEnabled: el.checked })],
+  ["#long-press", (el) => ({ longPressMs: Number(el.value) })],
+  ["#translation-provider", (el) => ({ translation: { provider: el.value } })],
+  ["#translation-endpoint", (el) => ({ translation: { endpoint: el.value } })],
+  ["#translation-key", (el) => ({ translation: { apiKey: el.value } })],
+  [
+    "#process-blacklist",
+    (el) => ({
+      processBlacklist: el.value
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    }),
+  ],
+];
+for (const [selector, toPatch] of settingFields) {
+  const element = document.querySelector(selector);
+  // "change" fires for checkboxes/selects immediately and for text fields on
+  // blur or Enter, so a half-typed hotkey is never registered.
+  element?.addEventListener("change", () => void applySettingChange(toPatch(element)));
+}
+for (const selector of ["#hotkey", "#screenshot-hotkey", "#translation-endpoint", "#translation-key", "#long-press"]) {
+  document.querySelector(selector)?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") event.currentTarget.blur();
+  });
+}
 
 document.querySelector("#add-plugin").addEventListener("click", async () => {
   try {

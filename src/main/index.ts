@@ -171,12 +171,15 @@ let getLauncherPosition: () => { x: number; y: number } | undefined = () => unde
 // Programmatic moves (show, resize, reset) must not overwrite the user's saved
 // drag position. The value is a timestamp until which `moved` events are ignored.
 let suppressLauncherPositionSaveUntil = 0;
+// Forces the launcher into the foreground through the native input helper;
+// assigned once the helper has started.
+let activateLauncher: () => void = () => undefined;
 
 /** Show the launcher at its persisted position (or the default when unset). */
 function summonLauncher(openSettings = false): void {
   if (launcher) {
     suppressLauncherPositionSaveUntil = Date.now() + 450;
-    showLauncher(launcher, openSettings, getLauncherPosition());
+    showLauncher(launcher, openSettings, getLauncherPosition(), activateLauncher);
   }
 }
 
@@ -1484,6 +1487,23 @@ void app.whenReady().then(async () => {
     void helper.prepareWindow(nativeHandle).catch(() => undefined);
   };
   prepareLauncherWindow();
+  activateLauncher = focusLauncher;
+  // Fallback for when the launcher never received focus (so no blur fires):
+  // hide it on any left/right click outside its bounds.
+  helper.on("click", (rawPoint: { x: number; y: number }) => {
+    if (!launcher || launcher.isDestroyed() || !launcher.isVisible()) return;
+    if (launcherDialogDepth > 0 || launcher.webContents.isDevToolsOpened()) return;
+    const bounds = launcher.getBounds();
+    // Still parked off-screen during the reveal; not really shown yet.
+    if (bounds.x < -10_000 || bounds.y < -10_000) return;
+    const point = screen.screenToDipPoint(rawPoint);
+    const inside =
+      point.x >= bounds.x &&
+      point.x < bounds.x + bounds.width &&
+      point.y >= bounds.y &&
+      point.y < bounds.y + bounds.height;
+    if (!inside) launcher.hide();
+  });
   helper.on("hotkey", () => {
     if (
       settingsStore.get().hotkey.replace(/\s/g, "").toLowerCase() ===

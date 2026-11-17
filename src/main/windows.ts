@@ -100,6 +100,7 @@ export function showLauncher(
   window: BrowserWindow,
   openSettings = false,
   position?: LauncherPosition | null,
+  activate?: () => void,
 ): void {
   if (openSettings) {
     window.setSize(SETTINGS_WIDTH, SETTINGS_HEIGHT, false);
@@ -117,14 +118,23 @@ export function showLauncher(
     if (openSettings) target = clampToWorkArea(target, width, height);
   }
   const { x, y } = target;
+  // Electron's focus() alone often fails for a background process, which
+  // leaves the launcher behind the foreground window and never blurred. Raise
+  // it, then let the caller force the foreground through the input helper.
+  const bringToFront = (): void => {
+    window.setAlwaysOnTop(true);
+    window.moveTop();
+    window.focus();
+    activate?.();
+  };
   const showAtTarget = (): void => {
     if (window.isDestroyed() || !window.isVisible()) return;
     window.setPosition(x, y, false);
-    window.focus();
+    bringToFront();
   };
   if (window.isVisible()) {
     window.setPosition(x, y, false);
-    window.focus();
+    bringToFront();
   } else {
     // Windows fades a newly shown transparent window in over ~100 ms, which
     // looks like a flicker. Show it off-screen first so the fade finishes where
