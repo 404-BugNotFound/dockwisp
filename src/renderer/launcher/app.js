@@ -1212,9 +1212,11 @@ function showHubPage(page = "settings") {
 }
 
 /* ---------- quick toggles ---------- */
+// group: 可选分组，显示为卡片底部的标签，同组项相邻排列；requiresAdmin: 显示“需管理员”标记。
 const QUICK_TOGGLES = [
   {
     id: "hide-spotlight-icon",
+    group: "桌面",
     title: "隐藏“了解此图片”图标",
     description: "隐藏 Windows 聚焦（动态桌面）在桌面上的图标，壁纸照常轮换",
     onMessage: "已隐藏桌面聚焦图标",
@@ -1222,6 +1224,8 @@ const QUICK_TOGGLES = [
   },
   {
     id: "block-auto-update",
+    group: "系统更新",
+    requiresAdmin: true,
     title: "关闭系统自动更新",
     description: "通过组策略停止自动下载安装更新，仍可手动检查更新；切换需管理员授权",
     onMessage: "已关闭系统自动更新",
@@ -1230,22 +1234,59 @@ const QUICK_TOGGLES = [
 ];
 let quickToggleLoad = 0;
 
+function sortQuickToggles(defs) {
+  const order = new Map();
+  for (const def of defs) {
+    const key = def.group || "";
+    if (!order.has(key)) order.set(key, order.size);
+  }
+  return defs
+    .map((def, index) => ({ def, index }))
+    .sort((a, b) => order.get(a.def.group || "") - order.get(b.def.group || "") || a.index - b.index)
+    .map((entry) => entry.def);
+}
+
 function createQuickToggleRow(def, state) {
   const row = document.createElement("label");
-  row.className = "toggle-row prominent-toggle";
+  row.className = "quick-toggle-tile";
   row.setAttribute("role", "listitem");
-  const text = document.createElement("span");
+  row.title = `${def.title}\n${def.description}`;
+
+  const head = document.createElement("div");
+  head.className = "quick-toggle-head";
   const title = document.createElement("strong");
+  title.className = "quick-toggle-title";
   title.textContent = def.title;
-  const desc = document.createElement("small");
-  desc.textContent = def.description;
-  text.append(title, desc);
   const input = document.createElement("input");
   input.type = "checkbox";
   input.className = "toggle";
   input.dataset.toggleId = def.id;
   input.setAttribute("aria-label", def.title);
-  row.append(text, input);
+  head.append(title, input);
+
+  const desc = document.createElement("p");
+  desc.className = "quick-toggle-desc";
+  desc.textContent = def.description;
+
+  const foot = document.createElement("div");
+  foot.className = "quick-toggle-foot";
+  const group = document.createElement("span");
+  group.className = "quick-toggle-group";
+  group.textContent = def.group || "";
+  foot.append(group);
+  if (!state) {
+    const badge = document.createElement("span");
+    badge.className = "quick-toggle-badge";
+    badge.textContent = "不可用";
+    foot.append(badge);
+  } else if (def.requiresAdmin) {
+    const badge = document.createElement("span");
+    badge.className = "quick-toggle-badge is-admin";
+    badge.textContent = "需管理员";
+    foot.append(badge);
+  }
+
+  row.append(head, desc, foot);
 
   if (!state) {
     input.disabled = true;
@@ -1291,7 +1332,7 @@ async function loadQuickToggles() {
   }
   if (token !== quickToggleLoad) return;
   const byId = new Map(states.map((state) => [state.id, state]));
-  list.replaceChildren(...QUICK_TOGGLES.map((def) => createQuickToggleRow(def, byId.get(def.id))));
+  list.replaceChildren(...sortQuickToggles(QUICK_TOGGLES).map((def) => createQuickToggleRow(def, byId.get(def.id))));
   const unavailable = QUICK_TOGGLES.some((def) => !byId.has(def.id));
   note.hidden = !unavailable;
   note.textContent = unavailable ? "部分开关在当前系统上不可用" : "";

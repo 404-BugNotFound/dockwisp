@@ -731,14 +731,64 @@ kbd {
 .toggle:checked::after { transform: translateX(16px); }
 .toggle:disabled { cursor: default; opacity: 0.45; }
 
-/* ---- 快捷开关页：数据驱动的开关列表，行样式沿用 prominent-toggle ---- */
-.quick-toggle-card { max-width: 640px; }
-.quick-toggle-list { display: grid; gap: 8px; }
-.quick-toggle-list .toggle-row { cursor: pointer; transition: opacity 140ms ease; }
-.quick-toggle-list .toggle-row strong { font-size: 12px; }
-.quick-toggle-list .toggle-row.is-unavailable { cursor: default; opacity: 0.6; }
-.quick-toggle-list .toggle-row.is-busy { cursor: progress; }
-.quick-toggle-note { color: var(--muted); font-size: 10px; padding: 0 2px; }
+/* ---- 快捷开关页：自适应多列卡片网格，风格对齐 plugin-card ---- */
+.quick-toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+.quick-toggle-tile {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 8px;
+  min-height: 118px;
+  padding: 13px 14px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--fill-weak);
+  cursor: pointer;
+  transition: background 130ms ease, border-color 130ms ease, opacity 130ms ease;
+}
+.quick-toggle-tile:hover { border-color: var(--brand-focus); background: var(--fill-soft); }
+.quick-toggle-tile:has(.toggle:checked) { border-color: color-mix(in srgb, var(--text) 22%, transparent); }
+.quick-toggle-tile:has(.toggle:focus-visible) { outline: 1px solid var(--brand-focus); outline-offset: 2px; }
+.quick-toggle-tile.is-unavailable { cursor: default; opacity: 0.55; }
+.quick-toggle-tile.is-unavailable:hover { border-color: var(--line); background: var(--fill-weak); }
+.quick-toggle-tile.is-busy { cursor: progress; }
+.quick-toggle-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; min-width: 0; }
+.quick-toggle-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-top: 2px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+.quick-toggle-desc {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.55;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.quick-toggle-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 18px; }
+.quick-toggle-group { color: var(--muted); font-size: 9.5px; letter-spacing: 0.02em; }
+.quick-toggle-badge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--fill-soft);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.quick-toggle-badge.is-admin { color: var(--text); }
+.quick-toggle-note { margin-top: 10px; color: var(--muted); font-size: 10px; padding: 0 2px; }
 
 /* ---- 截图快捷键：整行 label，与现有输入一致 ---- */
 .full-row-field { display: grid; gap: 6px; color: var(--muted); font-size: 10px; }
