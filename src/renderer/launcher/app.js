@@ -1212,45 +1212,70 @@ function showHubPage(page = "settings") {
 }
 
 /* ---------- quick toggles ---------- */
-// group: 可选分组，显示为卡片底部的标签，同组项相邻排列；requiresAdmin: 显示“需管理员”标记。
-const QUICK_TOGGLES = [
+// 按分区定义；effect 为生效方式（缺省即立即生效），admin 表示切换需要管理员授权。
+const QUICK_TOGGLE_SECTIONS = [
   {
-    id: "hide-spotlight-icon",
-    group: "桌面",
-    title: "隐藏“了解此图片”图标",
-    description: "隐藏 Windows 聚焦（动态桌面）在桌面上的图标，壁纸照常轮换",
-    onMessage: "已隐藏桌面聚焦图标",
-    offMessage: "已恢复桌面聚焦图标",
+    title: "桌面与资源管理器",
+    items: [
+      { id: "hide-spotlight-icon", title: "隐藏“了解此图片”图标", description: "隐藏 Windows 聚焦（动态桌面）在桌面上的图标，壁纸照常轮换" },
+      { id: "classic-context-menu", title: "恢复经典右键菜单", description: "Win11 右键直接显示完整菜单，不用再点“显示更多选项”", effect: "重启资源管理器" },
+      { id: "show-file-extensions", title: "显示文件扩展名", description: "始终显示 .txt、.exe 等文件扩展名" },
+      { id: "show-hidden-files", title: "显示隐藏文件", description: "显示带隐藏属性的文件和文件夹" },
+      { id: "explorer-open-this-pc", title: "默认打开“此电脑”", description: "打开资源管理器时进入“此电脑”，而不是主文件夹", effect: "新窗口生效" },
+      { id: "quick-access-no-recent", title: "不记录最近使用的文件", description: "快速访问和主文件夹不再显示最近使用的文件和常用文件夹", effect: "新窗口生效" },
+    ],
   },
   {
-    id: "block-auto-update",
-    group: "系统更新",
-    requiresAdmin: true,
-    title: "关闭系统自动更新",
-    description: "通过组策略停止自动下载安装更新，仍可手动检查更新；切换需管理员授权",
-    onMessage: "已关闭系统自动更新",
-    offMessage: "已恢复系统自动更新",
+    title: "开始菜单与任务栏",
+    items: [
+      { id: "disable-web-search", title: "关闭开始菜单网页搜索", description: "开始菜单只搜索本机内容，不再混入 Bing 结果", effect: "重启资源管理器" },
+      { id: "clock-seconds", title: "任务栏时钟显示秒", description: "任务栏右下角的时钟精确到秒", effect: "重启资源管理器" },
+      { id: "start-no-recommendations", title: "关闭开始菜单推荐和广告", description: "去掉“推荐”区的应用推广、提示和账户通知", effect: "重启资源管理器" },
+      { id: "disable-tips", title: "关闭提示与建议", description: "关闭锁屏趣闻、设置页推荐内容和“充分利用 Windows”等弹窗" },
+    ],
+  },
+  {
+    title: "输入与游戏",
+    items: [
+      { id: "disable-sticky-keys-shortcut", title: "关闭粘滞键快捷方式", description: "连按 5 次 Shift 不再弹出粘滞键对话框" },
+      { id: "disable-mouse-acceleration", title: "关闭鼠标加速", description: "即关闭“提高指针精确度”，指针移动距离与手的移动一致" },
+      { id: "disable-game-bar", title: "关闭 Xbox Game Bar", description: "按 Win+G 或在游戏中录制时不再弹出 Game Bar" },
+    ],
+  },
+  {
+    title: "系统",
+    admin: true,
+    items: [
+      { id: "block-auto-update", title: "关闭系统自动更新", description: "通过组策略停止自动下载安装更新，仍可手动检查更新" },
+      { id: "exclude-driver-updates", title: "更新时不安装驱动", description: "Windows 更新不再自动替换显卡等设备驱动", effect: "下次检查更新生效" },
+      { id: "disable-fast-startup", title: "关闭快速启动", description: "关机即完全关机，解决双系统读不到盘、关机后外设仍供电等问题", effect: "下次关机生效" },
+      { id: "disable-hibernation", title: "关闭休眠", description: "删除 hiberfil.sys，腾出与内存大小相当的 C 盘空间；同时会关闭快速启动" },
+      { id: "enable-long-paths", title: "启用长路径", description: "允许超过 260 个字符的文件路径，开发工具常用", effect: "新启动的程序生效" },
+    ],
   },
 ];
 let quickToggleLoad = 0;
+let quickToggleBusy = false;
 
-function sortQuickToggles(defs) {
-  const order = new Map();
-  for (const def of defs) {
-    const key = def.group || "";
-    if (!order.has(key)) order.set(key, order.size);
-  }
-  return defs
-    .map((def, index) => ({ def, index }))
-    .sort((a, b) => order.get(a.def.group || "") - order.get(b.def.group || "") || a.index - b.index)
-    .map((entry) => entry.def);
+function quickToggleBadge(text, extraClass = "") {
+  const badge = document.createElement("span");
+  badge.className = `quick-toggle-badge ${extraClass}`.trim();
+  badge.textContent = text;
+  return badge;
 }
 
-function createQuickToggleRow(def, state) {
+// 同一时间只允许一个开关在切换：处理中时锁住其余可用开关。
+function setQuickTogglesLocked(locked) {
+  for (const input of document.querySelectorAll("#quick-toggle-list input.toggle")) {
+    if (input.dataset.available === "true") input.disabled = locked;
+  }
+  document.querySelector("#quick-toggle-list").classList.toggle("is-locked", locked);
+}
+
+function createQuickToggleRow(def, state, admin) {
   const row = document.createElement("label");
   row.className = "quick-toggle-tile";
   row.setAttribute("role", "listitem");
-  row.title = `${def.title}\n${def.description}`;
 
   const head = document.createElement("div");
   head.className = "quick-toggle-head";
@@ -1261,30 +1286,29 @@ function createQuickToggleRow(def, state) {
   input.type = "checkbox";
   input.className = "toggle";
   input.dataset.toggleId = def.id;
+  input.dataset.available = state ? "true" : "false";
   input.setAttribute("aria-label", def.title);
   head.append(title, input);
 
   const desc = document.createElement("p");
   desc.className = "quick-toggle-desc";
   desc.textContent = def.description;
+  bindQuickToggleTip(desc);
 
   const foot = document.createElement("div");
   foot.className = "quick-toggle-foot";
-  const group = document.createElement("span");
-  group.className = "quick-toggle-group";
-  group.textContent = def.group || "";
-  foot.append(group);
+  const badges = document.createElement("span");
+  badges.className = "quick-toggle-badges";
   if (!state) {
-    const badge = document.createElement("span");
-    badge.className = "quick-toggle-badge";
-    badge.textContent = "不可用";
-    foot.append(badge);
-  } else if (def.requiresAdmin) {
-    const badge = document.createElement("span");
-    badge.className = "quick-toggle-badge is-admin";
-    badge.textContent = "需管理员";
-    foot.append(badge);
+    badges.append(quickToggleBadge("当前系统不可用"));
+  } else {
+    if (admin) badges.append(quickToggleBadge("需管理员", "is-admin"));
+    if (def.effect) badges.append(quickToggleBadge(def.effect));
   }
+  const busy = document.createElement("span");
+  busy.className = "quick-toggle-busy";
+  busy.textContent = admin ? "等待授权…" : "处理中…";
+  foot.append(badges, busy);
 
   row.append(head, desc, foot);
 
@@ -1294,17 +1318,24 @@ function createQuickToggleRow(def, state) {
     return row;
   }
   input.checked = Boolean(state.enabled);
+  input.disabled = quickToggleBusy;
   input.addEventListener("change", async () => {
+    if (quickToggleBusy) {
+      input.checked = !input.checked;
+      return;
+    }
     const wanted = input.checked;
     const status = document.querySelector("#settings-status");
-    input.disabled = true;
+    quickToggleBusy = true;
+    setQuickTogglesLocked(true);
     row.classList.add("is-busy");
+    row.setAttribute("aria-busy", "true");
     try {
       const result = await api.setQuickToggle(def.id, wanted);
       if (result && result.ok) {
         const enabled = Boolean(result.state && result.state.enabled);
         input.checked = enabled;
-        status.textContent = enabled ? def.onMessage : def.offMessage;
+        status.textContent = `${enabled ? "已开启" : "已关闭"}：${def.title}`;
       } else {
         input.checked = !wanted;
         status.textContent = (result && result.error) || "切换失败";
@@ -1313,16 +1344,78 @@ function createQuickToggleRow(def, state) {
       input.checked = !wanted;
       status.textContent = error.message || String(error);
     } finally {
-      input.disabled = false;
+      quickToggleBusy = false;
+      setQuickTogglesLocked(false);
       row.classList.remove("is-busy");
+      row.removeAttribute("aria-busy");
     }
   });
   return row;
 }
 
-async function loadQuickToggles() {
+function renderQuickToggles(byId) {
+  hideQuickToggleTip();
   const list = document.querySelector("#quick-toggle-list");
   const note = document.querySelector("#quick-toggle-note");
+  const sections = QUICK_TOGGLE_SECTIONS.map((section) => {
+    const block = document.createElement("section");
+    block.className = "quick-toggle-section";
+    const heading = document.createElement("div");
+    heading.className = "quick-toggle-section-head";
+    const name = document.createElement("h2");
+    name.textContent = section.title;
+    const meta = document.createElement("span");
+    meta.textContent = section.admin ? `${section.items.length} 项 · 切换需管理员授权` : `${section.items.length} 项`;
+    heading.append(name, meta);
+    const grid = document.createElement("div");
+    grid.className = "quick-toggle-grid";
+    grid.setAttribute("role", "list");
+    grid.setAttribute("aria-label", section.title);
+    grid.append(...section.items.map((def) => createQuickToggleRow(def, byId.get(def.id), Boolean(section.admin))));
+    block.append(heading, grid);
+    return block;
+  });
+  list.replaceChildren(...sections);
+  const unavailable = QUICK_TOGGLE_SECTIONS.some((section) => section.items.some((def) => !byId.has(def.id)));
+  note.hidden = !unavailable;
+  note.textContent = unavailable ? "标为“当前系统不可用”的开关不适用于此版本的 Windows" : "";
+}
+
+// 说明被截断时，悬停显示全文。提示层挂在 body 上，不会被卡片或页面的 overflow 裁掉。
+let quickToggleTip = null;
+
+function hideQuickToggleTip() {
+  if (quickToggleTip) quickToggleTip.hidden = true;
+}
+
+function showQuickToggleTip(target) {
+  if (target.scrollHeight <= target.clientHeight + 1) return;
+  if (!quickToggleTip) {
+    quickToggleTip = document.createElement("div");
+    quickToggleTip.className = "quick-toggle-tip";
+    quickToggleTip.setAttribute("role", "tooltip");
+    document.body.append(quickToggleTip);
+  }
+  quickToggleTip.textContent = target.textContent;
+  quickToggleTip.hidden = false;
+  const margin = 10;
+  const anchor = target.getBoundingClientRect();
+  const tip = quickToggleTip.getBoundingClientRect();
+  const left = Math.min(Math.max(margin, anchor.left - 8), window.innerWidth - tip.width - margin);
+  let top = anchor.bottom + 6;
+  if (top + tip.height > window.innerHeight - margin) top = anchor.top - tip.height - 6;
+  quickToggleTip.style.left = `${Math.round(left)}px`;
+  quickToggleTip.style.top = `${Math.round(Math.max(margin, top))}px`;
+}
+
+function bindQuickToggleTip(target) {
+  target.addEventListener("mouseenter", () => showQuickToggleTip(target));
+  target.addEventListener("mouseleave", hideQuickToggleTip);
+}
+
+document.querySelector("#page-toggles")?.addEventListener("scroll", hideQuickToggleTip, { passive: true });
+
+async function loadQuickToggles() {
   const token = ++quickToggleLoad;
   let states = [];
   try {
@@ -1332,10 +1425,7 @@ async function loadQuickToggles() {
   }
   if (token !== quickToggleLoad) return;
   const byId = new Map(states.map((state) => [state.id, state]));
-  list.replaceChildren(...sortQuickToggles(QUICK_TOGGLES).map((def) => createQuickToggleRow(def, byId.get(def.id))));
-  const unavailable = QUICK_TOGGLES.some((def) => !byId.has(def.id));
-  note.hidden = !unavailable;
-  note.textContent = unavailable ? "部分开关在当前系统上不可用" : "";
+  renderQuickToggles(byId);
 }
 
 function createPluginCard(plugin) {
