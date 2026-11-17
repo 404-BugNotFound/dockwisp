@@ -17,6 +17,9 @@ contextBridge.exposeInMainWorld("dockwisp", {
   clearUsage: () => ipcRenderer.invoke("usage:clear"),
   resetPosition: () => ipcRenderer.invoke("launcher:reset-position"),
   listPlugins: () => ipcRenderer.invoke("plugins:list"),
+  listQuickToggles: () => ipcRenderer.invoke("toggles:list"),
+  setQuickToggle: (id: string, enabled: boolean) =>
+    ipcRenderer.invoke("toggles:set", id, enabled),
   startScreenshot: () => ipcRenderer.send("screenshot:start"),
   openBuiltin: (id: string) => ipcRenderer.send("builtin:open", id),
   dragStart: (screenX: number, screenY: number) =>

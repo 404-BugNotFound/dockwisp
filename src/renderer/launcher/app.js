@@ -1191,7 +1191,7 @@ if (contentDropZone) {
 }
 
 /* ---------- settings ---------- */
-const HUB_PAGES = new Set(["settings", "plugins"]);
+const HUB_PAGES = new Set(["settings", "plugins", "toggles"]);
 let hubPage = "settings";
 let pluginList = [];
 let customItems = [];
@@ -1206,7 +1206,95 @@ function showHubPage(page = "settings") {
   }
   document.querySelector("#page-settings").hidden = next !== "settings";
   document.querySelector("#page-plugins").hidden = next !== "plugins";
+  document.querySelector("#page-toggles").hidden = next !== "toggles";
   if (next === "plugins") void loadPlugins();
+  if (next === "toggles") void loadQuickToggles();
+}
+
+/* ---------- quick toggles ---------- */
+const QUICK_TOGGLES = [
+  {
+    id: "hide-spotlight-icon",
+    title: "隐藏“了解此图片”图标",
+    description: "隐藏 Windows 聚焦（动态桌面）在桌面上的图标，壁纸照常轮换",
+    onMessage: "已隐藏桌面聚焦图标",
+    offMessage: "已恢复桌面聚焦图标",
+  },
+  {
+    id: "block-auto-update",
+    title: "关闭系统自动更新",
+    description: "通过组策略停止自动下载安装更新，仍可手动检查更新；切换需管理员授权",
+    onMessage: "已关闭系统自动更新",
+    offMessage: "已恢复系统自动更新",
+  },
+];
+let quickToggleLoad = 0;
+
+function createQuickToggleRow(def, state) {
+  const row = document.createElement("label");
+  row.className = "toggle-row prominent-toggle";
+  row.setAttribute("role", "listitem");
+  const text = document.createElement("span");
+  const title = document.createElement("strong");
+  title.textContent = def.title;
+  const desc = document.createElement("small");
+  desc.textContent = def.description;
+  text.append(title, desc);
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.className = "toggle";
+  input.dataset.toggleId = def.id;
+  input.setAttribute("aria-label", def.title);
+  row.append(text, input);
+
+  if (!state) {
+    input.disabled = true;
+    row.classList.add("is-unavailable");
+    return row;
+  }
+  input.checked = Boolean(state.enabled);
+  input.addEventListener("change", async () => {
+    const wanted = input.checked;
+    const status = document.querySelector("#settings-status");
+    input.disabled = true;
+    row.classList.add("is-busy");
+    try {
+      const result = await api.setQuickToggle(def.id, wanted);
+      if (result && result.ok) {
+        const enabled = Boolean(result.state && result.state.enabled);
+        input.checked = enabled;
+        status.textContent = enabled ? def.onMessage : def.offMessage;
+      } else {
+        input.checked = !wanted;
+        status.textContent = (result && result.error) || "切换失败";
+      }
+    } catch (error) {
+      input.checked = !wanted;
+      status.textContent = error.message || String(error);
+    } finally {
+      input.disabled = false;
+      row.classList.remove("is-busy");
+    }
+  });
+  return row;
+}
+
+async function loadQuickToggles() {
+  const list = document.querySelector("#quick-toggle-list");
+  const note = document.querySelector("#quick-toggle-note");
+  const token = ++quickToggleLoad;
+  let states = [];
+  try {
+    states = (await api.listQuickToggles()) || [];
+  } catch (error) {
+    document.querySelector("#settings-status").textContent = error.message || String(error);
+  }
+  if (token !== quickToggleLoad) return;
+  const byId = new Map(states.map((state) => [state.id, state]));
+  list.replaceChildren(...QUICK_TOGGLES.map((def) => createQuickToggleRow(def, byId.get(def.id))));
+  const unavailable = QUICK_TOGGLES.some((def) => !byId.has(def.id));
+  note.hidden = !unavailable;
+  note.textContent = unavailable ? "部分开关在当前系统上不可用" : "";
 }
 
 function createPluginCard(plugin) {

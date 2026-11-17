@@ -75,6 +75,10 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 3h4v3a2 2 0 1 0 4 0h3v6h-2.5a2.5 2.5 0 1 0 0 5H21v4h-5v-2a2 2 0 1 0-4 0v2H3v-4h2a2.5 2.5 0 1 0 0-5H3V9h3a2 2 0 1 0 4 0V6h0Z"/></svg>
             <span>插件</span>
           </button>
+          <button class="nav-item" type="button" data-page="toggles">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="6" width="20" height="12" rx="6"/><circle cx="16" cy="12" r="3"/></svg>
+            <span>快捷开关</span>
+          </button>
           <span class="nav-spacer"></span>
           <div class="nav-footer"><span>Dockwisp</span><span id="hub-version"></span></div>
         </aside>
@@ -236,6 +240,17 @@
             </div>
             <div id="plugin-grid" class="plugin-grid" role="list"></div>
             <div id="plugin-empty" class="plugin-empty" hidden>没有找到匹配的插件</div>
+          </section>
+
+          <section id="page-toggles" class="hub-page" hidden>
+            <div class="page-heading">
+              <h1>快捷开关</h1>
+              <p>一键调整常用系统设置</p>
+            </div>
+            <article class="setting-card quick-toggle-card">
+              <div id="quick-toggle-list" class="quick-toggle-list" role="list"></div>
+              <div id="quick-toggle-note" class="quick-toggle-note" hidden></div>
+            </article>
           </section>
         </div>
       </div>

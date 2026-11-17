@@ -729,6 +729,16 @@ kbd {
 }
 .toggle:checked { background: color-mix(in srgb, var(--text) 72%, transparent); }
 .toggle:checked::after { transform: translateX(16px); }
+.toggle:disabled { cursor: default; opacity: 0.45; }
+
+/* ---- 快捷开关页：数据驱动的开关列表，行样式沿用 prominent-toggle ---- */
+.quick-toggle-card { max-width: 640px; }
+.quick-toggle-list { display: grid; gap: 8px; }
+.quick-toggle-list .toggle-row { cursor: pointer; transition: opacity 140ms ease; }
+.quick-toggle-list .toggle-row strong { font-size: 12px; }
+.quick-toggle-list .toggle-row.is-unavailable { cursor: default; opacity: 0.6; }
+.quick-toggle-list .toggle-row.is-busy { cursor: progress; }
+.quick-toggle-note { color: var(--muted); font-size: 10px; padding: 0 2px; }
 
 /* ---- 截图快捷键：整行 label，与现有输入一致 ---- */
 .full-row-field { display: grid; gap: 6px; color: var(--muted); font-size: 10px; }

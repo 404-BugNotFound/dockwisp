@@ -76,6 +76,7 @@ import { PluginHost } from "./plugin-host";
 import { PluginPackageInstaller } from "./plugin-package";
 import { PluginRegistry } from "./plugin-registry";
 import { PreviewController } from "./preview-controller";
+import { listQuickToggles, setQuickToggle } from "./quick-toggles";
 import { ScreenshotController } from "./screenshot-controller";
 import { AppSettings, SettingsStore } from "./settings";
 import { TranslationController } from "./translation-controller";
@@ -2580,6 +2581,14 @@ void app.whenReady().then(async () => {
     shell.showItemInFolder(filePath);
     launcher?.hide();
     return { ok: true };
+  });
+  ipcMain.handle("toggles:list", () => listQuickToggles());
+  ipcMain.handle("toggles:set", async (_event, id: unknown, enabled: unknown) => {
+    try {
+      return { ok: true, state: await setQuickToggle(id, enabled) };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   });
   ipcMain.handle("launcher:reset-position", () => {
     settingsStore.update({ launcherPosition: null });
