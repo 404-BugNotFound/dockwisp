@@ -37,6 +37,21 @@ export const BUILTIN_FEATURES: BuiltinFeature[] = [
     keywords: ["截图", "截屏", "区域截图", "screenshot", "capture", "snip", "ocr"],
   },
   {
+    id: "builtin:record",
+    title: "录屏",
+    keywords: [
+      "录屏",
+      "屏幕录制",
+      "录制屏幕",
+      "录像",
+      "区域录屏",
+      "全屏录屏",
+      "record",
+      "screen record",
+      "recorder",
+    ],
+  },
+  {
     id: "builtin:hosts",
     title: "hosts 切换",
     keywords: ["hosts", "hosts切换", "切换hosts", "域名", "host"],

@@ -282,6 +282,64 @@ std::string enumerate_windows_json() {
   return stream.str();
 }
 
+struct WindowRectQuery {
+  DWORD exclude_pid;
+  std::vector<RECT> rects;
+};
+
+// Top-level windows in Z order (EnumWindows yields topmost first) for the
+// screenshot overlay's "hover a window to select it" behaviour. Rects are the
+// DWM visible frame in physical screen pixels.
+BOOL CALLBACK enum_window_rects_proc(HWND window, LPARAM data) {
+  auto* query = reinterpret_cast<WindowRectQuery*>(data);
+  if (query->rects.size() >= 500) return FALSE;
+  if (!IsWindowVisible(window) || IsIconic(window)) return TRUE;
+  const LONG_PTR ex_style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+  if (ex_style & WS_EX_TOOLWINDOW) return TRUE;
+
+  BOOL cloaked = FALSE;
+  if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) &&
+      cloaked) {
+    return TRUE;
+  }
+
+  wchar_t class_name[256]{};
+  if (GetClassNameW(window, class_name, 256) > 0) {
+    const std::wstring name(class_name);
+    if (name == L"Progman" || name == L"WorkerW") return TRUE;
+  }
+
+  DWORD process_id = 0;
+  GetWindowThreadProcessId(window, &process_id);
+  if (query->exclude_pid && process_id == query->exclude_pid) return TRUE;
+  if (process_id == GetCurrentProcessId()) return TRUE;
+
+  RECT rect{};
+  if (FAILED(DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &rect, sizeof(rect)))) {
+    if (!GetWindowRect(window, &rect)) return TRUE;
+  }
+  if (rect.right - rect.left <= 0 || rect.bottom - rect.top <= 0) return TRUE;
+  query->rects.push_back(rect);
+  return TRUE;
+}
+
+std::string enumerate_window_rects_json(DWORD exclude_pid) {
+  WindowRectQuery query{exclude_pid, {}};
+  EnumWindows(enum_window_rects_proc, reinterpret_cast<LPARAM>(&query));
+  std::ostringstream stream;
+  stream << "\"rects\":[";
+  bool first = true;
+  for (const auto& rect : query.rects) {
+    if (!first) stream << ',';
+    first = false;
+    stream << "{\"x\":" << rect.left << ",\"y\":" << rect.top
+           << ",\"width\":" << (rect.right - rect.left)
+           << ",\"height\":" << (rect.bottom - rect.top) << "}";
+  }
+  stream << "]";
+  return stream.str();
+}
+
 bool send_media_key(WORD virtual_key) {
   INPUT inputs[2]{};
   inputs[0].type = INPUT_KEYBOARD;
@@ -495,6 +553,15 @@ void command_loop() {
       respond(id, true, "\"text\":\"" + json_escape(text) + "\"");
     } else if (command == "windows") {
       respond(id, true, enumerate_windows_json());
+    } else if (command == "winrects") {
+      // winrects <id> [excludePid] — visible top-level window rects, top to bottom.
+      DWORD exclude_pid = 0;
+      try {
+        if (!value.empty()) exclude_pid = static_cast<DWORD>(std::stoul(value));
+      } catch (...) {
+        exclude_pid = 0;
+      }
+      respond(id, true, enumerate_window_rects_json(exclude_pid));
     } else if (command == "media") {
       WORD key = 0;
       if (value == "mute") key = VK_VOLUME_MUTE;

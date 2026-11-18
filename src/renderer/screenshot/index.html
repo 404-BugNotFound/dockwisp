@@ -69,6 +69,16 @@
       <!-- 底部极简提示 -->
       <div id="hint">拖动选择区域 · Enter 全屏复制 · Esc 取消</div>
 
+      <!-- 录屏进行中：顶部常驻“结束录制”入口，无需先框选 -->
+      <div id="recLive" role="status" hidden>
+        <span class="rec-live-dot" aria-hidden="true"></span>
+        <span class="rec-live-label">正在录屏</span>
+        <span class="rec-live-time" id="recLiveTime">00:00</span>
+        <button class="rec-live-stop" id="recLiveStop" type="button">
+          <i aria-hidden="true"></i><span>结束录制</span>
+        </button>
+      </div>
+
       <!-- 主工具栏 -->
       <div id="toolbar" hidden>
         <div class="tb-group" id="tools">
@@ -116,6 +126,12 @@
 
         <span class="tb-sep"></span>
 
+        <button class="tb-record" id="record" type="button" title="录制选区" aria-haspopup="dialog" aria-expanded="false">
+          <i class="rec-dot" aria-hidden="true"></i><span id="recordLabel">录屏</span>
+        </button>
+
+        <span class="tb-sep"></span>
+
         <div class="tb-group">
           <button class="tb-btn" id="undo" type="button" title="撤销 (Ctrl+Z)" aria-label="撤销">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 L4 11 L9 15 M4 11 H14.5 A5 5 0 0 1 14.5 21 H10" /></svg>
@@ -139,6 +155,29 @@
       <div id="subbar" hidden>
         <i id="subArrow"></i>
         <div id="subContent"></div>
+      </div>
+
+      <!-- 录屏声音选项 -->
+      <div id="recordPop" role="dialog" aria-label="录屏声音" hidden>
+        <i id="recordArrow"></i>
+        <div class="rec-title">录制声音</div>
+        <div class="rec-options" role="radiogroup" aria-label="录制声音">
+          <button class="rec-option" type="button" role="radio" data-audio="none" aria-checked="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5 H7.5 L12 5.5 V18.5 L7.5 14.5 H4 Z M16 9.5 L21 14.5 M21 9.5 L16 14.5" /></svg>
+            <span>不录声音</span>
+          </button>
+          <button class="rec-option" type="button" role="radio" data-audio="system" aria-checked="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5 H7.5 L12 5.5 V18.5 L7.5 14.5 H4 Z M15.5 9 C16.8 10.6 16.8 13.4 15.5 15 M18.2 6.5 C21 9.8 21 14.2 18.2 17.5" /></svg>
+            <span>系统声音</span>
+          </button>
+          <button class="rec-option" type="button" role="radio" data-audio="system+mic" aria-checked="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3.5" width="6" height="10.5" rx="3" /><path d="M6 11 C6 14.6 8.7 17 12 17 C15.3 17 18 14.6 18 11 M12 17 V20.5 M9 20.5 H15" /></svg>
+            <span>系统声音 + 麦克风</span>
+          </button>
+        </div>
+        <button class="rec-start" id="recordStart" type="button">
+          <i class="rec-dot" aria-hidden="true"></i><span>开始录制</span>
+        </button>
       </div>
 
       <!-- 结果面板（提取文字） -->

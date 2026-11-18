@@ -136,6 +136,28 @@ body {
 #root[data-long="true"] #dim {
   display: none;
 }
+/* 无选区时的悬停框：遮罩围出鼠标所在窗体（或全屏），框外变暗 */
+#root[data-hovering="true"] .mask {
+  display: block;
+}
+#root[data-hovering="true"] #dim {
+  display: none;
+}
+#hoverBox {
+  position: absolute;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  border: 2px solid var(--sel-line);
+  pointer-events: none;
+}
+#hoverBox[hidden],
+#root[data-long="true"] #hoverBox {
+  display: none;
+}
+#root[data-entering="true"] #hoverBox {
+  opacity: 0;
+}
 
 .size-tag {
   position: absolute;
@@ -222,6 +244,113 @@ body {
 }
 #root[data-has-selection="true"] #hint,
 #root[data-long="true"] #hint {
+  display: none;
+}
+
+/* 录屏进行中：顶部居中的“结束录制”胶囊（无需先框选） */
+#recLive {
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  z-index: 35;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 5px 0 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(22, 23, 28, 0.92);
+  color: #fff;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), 0 0 0 4px rgba(240, 68, 58, 0.16);
+  transform: translateX(-50%);
+  animation: rec-live-in 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+#recLive[hidden] {
+  display: none;
+}
+@keyframes rec-live-in {
+  from { opacity: 0; transform: translate(-50%, -8px); }
+}
+.rec-live-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #f0443a;
+  box-shadow: 0 0 0 3px rgba(240, 68, 58, 0.28);
+  animation: rec-live-blink 1.2s ease-in-out infinite alternate;
+}
+#recLive.paused .rec-live-dot {
+  background: #9a9ba6;
+  box-shadow: 0 0 0 3px rgba(154, 155, 166, 0.25);
+  animation: none;
+}
+@keyframes rec-live-blink {
+  to { opacity: 0.3; }
+}
+.rec-live-label {
+  font-weight: 600;
+}
+.rec-live-time {
+  min-width: 3.2em;
+  color: rgba(255, 255, 255, 0.72);
+  font-variant-numeric: tabular-nums;
+}
+.rec-live-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 14px 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: #f0443a;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.14s ease, transform 0.14s ease;
+}
+.rec-live-stop i {
+  display: block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: #fff;
+}
+.rec-live-stop:hover {
+  background: #ff5a50;
+}
+.rec-live-stop:active {
+  transform: scale(0.97);
+}
+.rec-live-stop:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.rec-live-stop:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+/* 录制中工具栏按钮：实心红底“结束录制” */
+#root[data-recording="true"] .tb-record {
+  border-color: transparent;
+  background: var(--rec-red);
+  color: #fff;
+}
+#root[data-recording="true"] .tb-record .rec-dot {
+  border-radius: 2px;
+  width: 8px;
+  height: 8px;
+  background: #fff;
+  box-shadow: none;
+}
+#root[data-recording="true"] .tb-record .rec-dot::after {
   display: none;
 }
 
@@ -312,6 +441,196 @@ body {
 }
 @keyframes pulse {
   50% { opacity: 0.35; }
+}
+
+/* ---------------- 录屏按钮与声音弹层 ---------------- */
+:root {
+  --rec-red: #f0443a;
+  --rec-red-soft: rgba(240, 68, 58, 0.1);
+}
+.tb-record {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  margin: 0 2px;
+  padding: 0 11px 0 9px;
+  border: 1px solid rgba(240, 68, 58, 0.28);
+  border-radius: 14px;
+  background: var(--rec-red-soft);
+  color: #d4362d;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+}
+.tb-record:hover,
+.tb-record[aria-expanded="true"] {
+  border-color: transparent;
+  background: var(--rec-red);
+  color: #fff;
+}
+.tb-record:disabled {
+  opacity: 0.32;
+  background: var(--rec-red-soft);
+  color: #d4362d;
+  cursor: default;
+}
+.rec-dot {
+  position: relative;
+  display: block;
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--rec-red);
+  box-shadow: 0 0 0 2px rgba(240, 68, 58, 0.22);
+}
+.tb-record:hover .rec-dot,
+.tb-record[aria-expanded="true"] .rec-dot,
+.rec-start .rec-dot {
+  background: #fff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.32);
+}
+.tb-record:not(:disabled) .rec-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: inherit;
+  animation: rec-ping 2.4s ease-out infinite;
+}
+@keyframes rec-ping {
+  0% { transform: scale(1); opacity: 0.55; }
+  45%, 100% { transform: scale(2.4); opacity: 0; }
+}
+
+#recordPop {
+  position: absolute;
+  width: 212px;
+  padding: 12px 10px 10px;
+  background: var(--tb-bg);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2), 0 1px 4px rgba(0, 0, 0, 0.1);
+  color: #1a1b1f;
+  z-index: 21;
+  transform-origin: var(--pop-origin, 50% 0);
+  animation: rec-pop-in 0.16s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+#recordPop[hidden] {
+  display: none;
+}
+@keyframes rec-pop-in {
+  from { opacity: 0; transform: translateY(var(--pop-shift, -4px)) scale(0.97); }
+}
+#recordArrow {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: var(--tb-bg);
+  transform: rotate(45deg);
+}
+#recordPop[data-side="below"] #recordArrow {
+  top: -6px;
+  box-shadow: -2px -2px 4px rgba(0, 0, 0, 0.04);
+}
+#recordPop[data-side="above"] #recordArrow {
+  bottom: -6px;
+  box-shadow: 2px 2px 4px rgba(0, 0, 0, 0.05);
+}
+.rec-title {
+  position: relative;
+  padding: 0 6px 8px;
+  color: var(--icon-muted);
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+}
+.rec-options {
+  position: relative;
+  display: grid;
+  gap: 2px;
+}
+.rec-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 34px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--icon);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.rec-option:hover {
+  background: var(--tb-hover);
+}
+.rec-option svg {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.rec-option::after {
+  content: "";
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-left: auto;
+  border: 1.5px solid #c9cbd0;
+  border-radius: 50%;
+  box-sizing: border-box;
+  transition: border 0.12s ease;
+}
+.rec-option[aria-checked="true"] {
+  background: var(--wx-green-soft);
+  color: #079a4e;
+  font-weight: 600;
+}
+.rec-option[aria-checked="true"]::after {
+  border: 4.5px solid var(--wx-green);
+}
+.rec-option:focus-visible,
+.rec-start:focus-visible,
+.tb-record:focus-visible {
+  outline: 2px solid var(--wx-green);
+  outline-offset: 1px;
+}
+.rec-start {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  height: 34px;
+  margin-top: 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--rec-red);
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, transform 0.08s ease;
+}
+.rec-start:hover {
+  background: #dc3a31;
+}
+.rec-start:active {
+  transform: scale(0.98);
 }
 
 /* ---------------- 二级栏 ---------------- */

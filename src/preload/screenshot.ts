@@ -57,6 +57,13 @@ interface LongResult {
   height: number;
 }
 
+interface RecordState {
+  recording: boolean;
+  active: boolean;
+  paused: boolean;
+  elapsedMs: number;
+}
+
 contextBridge.exposeInMainWorld("screenshot", {
   onState: (callback: (state: ScreenshotState) => void) =>
     ipcRenderer.on("screenshot:state", (_event, state: ScreenshotState) => callback(state)),
@@ -90,4 +97,9 @@ contextBridge.exposeInMainWorld("screenshot", {
     ipcRenderer.on("screenshot:long-result", (_event, result: LongResult) => callback(result)),
   onLongCancel: (callback: () => void) =>
     ipcRenderer.on("screenshot:long-cancel", () => callback()),
+  recordStart: (payload: LongRect & { audio: "none" | "system" | "system+mic" }): void =>
+    ipcRenderer.send("screenshot:record-start", payload),
+  recordStop: (): void => ipcRenderer.send("screenshot:record-stop"),
+  onRecordState: (callback: (state: RecordState) => void) =>
+    ipcRenderer.on("screenshot:record-state", (_event, state: RecordState) => callback(state)),
 });

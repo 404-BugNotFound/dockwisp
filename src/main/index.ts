@@ -921,6 +921,12 @@ const SCREENSHOT_ICON_URL =
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/></svg>',
   );
 
+const RECORD_ICON_URL =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f9f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2.5"/><circle cx="12" cy="12" r="3" fill="#8a8f9f"/></svg>',
+  );
+
 const PLUGIN_ICON_URL =
   "data:image/svg+xml," +
   encodeURIComponent(
@@ -995,6 +1001,12 @@ const BUILTIN_FEATURE_META: Record<string, BuiltinFeatureMeta> = {
     title: "截图",
     subtitle: "区域截图 · 编辑 · OCR · 翻译",
     iconUrl: SCREENSHOT_ICON_URL,
+  },
+  "builtin:record": {
+    action: "record",
+    title: "录屏",
+    subtitle: "全屏或区域录屏 · 可录系统声音与麦克风",
+    iconUrl: RECORD_ICON_URL,
   },
   "builtin:hosts": {
     action: "hosts",
@@ -1835,6 +1847,7 @@ void app.whenReady().then(async () => {
     if (!launcher || event.sender !== launcher.webContents) return;
     launcher.hide();
     if (id === "builtin:screenshot") void screenshotController.open(true);
+    else if (id === "builtin:record") screenshotController.openForRecord();
     else if (id === "builtin:hosts") hostsController.open();
     else if (id === "builtin:diff") diffController.open();
     else if (id === "builtin:convert") convertController.open();
@@ -2195,6 +2208,11 @@ void app.whenReady().then(async () => {
       if (match.action === "screenshot") {
         launcher?.hide();
         void screenshotController.open(true);
+        return { ok: true, hide: true };
+      }
+      if (match.action === "record") {
+        launcher?.hide();
+        screenshotController.openForRecord();
         return { ok: true, hide: true };
       }
       if (match.action === "hosts") {

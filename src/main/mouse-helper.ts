@@ -25,6 +25,7 @@ interface HelperResponse {
   text?: string;
   error?: string;
   windows?: WindowInfo[];
+  rects?: ScreenRect[];
   width?: number;
   height?: number;
   bltMs?: number;
@@ -62,6 +63,14 @@ export interface WindowInfo {
   title: string;
   pid: number;
   process: string;
+}
+
+/** Physical-pixel rectangle in virtual-screen coordinates. */
+export interface ScreenRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 interface HotkeyEvent {
@@ -140,6 +149,16 @@ export class MouseHelper extends EventEmitter {
   async listWindows(): Promise<WindowInfo[]> {
     const response = await this.request("windows", [], 3_000);
     return response.ok && Array.isArray(response.windows) ? response.windows : [];
+  }
+
+  /**
+   * Visible top-level window frames (DWM extended frame bounds, physical
+   * pixels), ordered top to bottom in Z order. Windows owned by `excludePid`
+   * are skipped.
+   */
+  async listWindowRects(excludePid = 0): Promise<ScreenRect[]> {
+    const response = await this.request("winrects", [String(Math.max(0, Math.trunc(excludePid)))], 1_500);
+    return response.ok && Array.isArray(response.rects) ? response.rects : [];
   }
 
   async media(action: "mute" | "up" | "down"): Promise<void> {

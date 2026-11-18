@@ -15,11 +15,16 @@ import path from "node:path";
 import { translateText } from "../translation/providers";
 import { detectLanguage } from "../translation/language";
 import { repairOcrSpacing } from "../core/ocr-words";
-import { MouseHelper } from "./mouse-helper";
+import { MouseHelper, type ScreenRect } from "./mouse-helper";
 import { ocrResizeDimensions, recognizeImageFile, recognizeImageLayout, warmupOcr } from "./ocr";
 import { SettingsStore } from "./settings";
 import { PinWindowManager, type PinPayload } from "./pin-window";
 import { LongCaptureSession, type LongCaptureRect } from "./long-capture";
+import { RecordController, type RecordAudioMode } from "./record-controller";
+
+const RECORD_AUDIO_MODES: ReadonlySet<string> = new Set(["none", "system", "system+mic"]);
+// Wait after hiding the overlay so the compositor drops it before capture starts.
+const RECORD_START_DELAY_MS = 150;
 
 interface ScreenshotState {
   // Native captures send raw top-down RGBA pixels (no encoding, no file);
@@ -29,6 +34,21 @@ interface ScreenshotState {
   width: number;
   height: number;
   scaleFactor: number;
+  // Top-level window frames under the capture, topmost first, in image pixels
+  // relative to the captured display. Empty when the helper is unavailable.
+  windowRects: ImageRect[];
+  // Cursor position at capture time, in image pixels (null if off-display).
+  cursor: { x: number; y: number } | null;
+  // Opened from the launcher's 录屏 entry: the renderer opens the record
+  // panel as soon as a region is confirmed.
+  recordIntent: boolean;
+}
+
+interface ImageRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 interface CaptureOutput {
@@ -159,6 +179,9 @@ export class ScreenshotController {
   private captureDisplayInfo: Electron.Display | null = null;
   private readonly pins = new PinWindowManager();
   private longSession: LongCaptureSession | null = null;
+  private readonly recorder = new RecordController({
+    onStateChange: () => this.sendRecordState(),
+  });
 
   constructor(
     private readonly launcher: BrowserWindow,
@@ -222,14 +245,27 @@ export class ScreenshotController {
    * is set when the capture is started from inside the launcher. The global
    * hotkey leaves it alone so the launcher itself can be captured.
    */
-  open(hideLauncher = false): void {
+  open(hideLauncher = false, recordIntent = false): void {
     const token = ++this.captureToken;
-    void this.capture(token, hideLauncher).catch((error) => {
+    void this.capture(token, hideLauncher, recordIntent).catch((error) => {
       dialog.showErrorBox(
         "截图失败",
         error instanceof Error ? error.message : String(error),
       );
     });
+  }
+
+  /**
+   * Launcher 录屏 entry. While a recording runs it stops it (which goes through
+   * the save dialog); otherwise it opens the capture overlay with record
+   * intent, so the record panel pops up once a region is chosen.
+   */
+  openForRecord(): void {
+    if (this.recorder.isRecording()) {
+      void this.recorder.stop();
+      return;
+    }
+    this.open(true, true);
   }
 
   /** Create (if needed) the reusable hidden overlay window and start its load. */
@@ -305,7 +341,11 @@ export class ScreenshotController {
     return overlay;
   }
 
-  private async capture(token: number, hideLauncher: boolean): Promise<void> {
+  private async capture(
+    token: number,
+    hideLauncher: boolean,
+    recordIntent = false,
+  ): Promise<void> {
     const timing = new CaptureTiming(this.lastOpenAt);
     this.lastOpenAt = Date.now();
     // Opening the overlay supersedes any long-screenshot session in progress.
@@ -338,9 +378,13 @@ export class ScreenshotController {
 
     const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     this.captureDisplayInfo = display;
+    // Window frames for hover-to-select are fetched alongside the screenshot.
+    const windowRectsPromise = this.listWindowRects();
     const capture = await this.captureDisplay(display);
     if (token !== this.captureToken) return;
     timing.mark(capture.native ? "captureGdi" : "captureFallback");
+    const hover = this.toImageSpace(display, capture, await windowRectsPromise);
+    if (token !== this.captureToken) return;
 
     const overlayExisted = !!this.overlay && !this.overlay.isDestroyed();
     const overlay = this.ensureOverlay();
@@ -371,6 +415,9 @@ export class ScreenshotController {
       width: capture.width,
       height: capture.height,
       scaleFactor: display.scaleFactor,
+      windowRects: hover.windowRects,
+      cursor: hover.cursor,
+      recordIntent,
     };
 
     let placed = false;
@@ -416,8 +463,60 @@ export class ScreenshotController {
     };
     this.revealOverlay = () => reveal(false);
     overlay.webContents.send("screenshot:state", state);
+    this.sendRecordState();
     timing.mark("stateSent");
     this.revealTimer = setTimeout(() => reveal(true), 1_000);
+  }
+
+  /** Window frames from the helper (physical pixels); empty on any failure. */
+  private async listWindowRects(): Promise<ScreenRect[]> {
+    if (!this.helper) return [];
+    try {
+      return await this.helper.listWindowRects(process.pid);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Map physical-pixel window frames and the cursor into the overlay's image
+   * pixel space (origin = captured display's top-left), clipped to the image.
+   */
+  private toImageSpace(
+    display: Electron.Display,
+    capture: CaptureOutput,
+    rects: ScreenRect[],
+  ): { windowRects: ImageRect[]; cursor: { x: number; y: number } | null } {
+    const origin = screen.dipToScreenRect(null, display.bounds);
+    // The fallback capture may not match the physical size exactly; scale.
+    const sx = origin.width > 0 ? capture.width / origin.width : 1;
+    const sy = origin.height > 0 ? capture.height / origin.height : 1;
+    const windowRects: ImageRect[] = [];
+    for (const rect of rects) {
+      if (
+        !rect ||
+        !Number.isFinite(rect.x) ||
+        !Number.isFinite(rect.y) ||
+        !Number.isFinite(rect.width) ||
+        !Number.isFinite(rect.height)
+      ) {
+        continue;
+      }
+      const left = Math.max(0, Math.round((rect.x - origin.x) * sx));
+      const top = Math.max(0, Math.round((rect.y - origin.y) * sy));
+      const right = Math.min(capture.width, Math.round((rect.x + rect.width - origin.x) * sx));
+      const bottom = Math.min(capture.height, Math.round((rect.y + rect.height - origin.y) * sy));
+      if (right - left < 1 || bottom - top < 1) continue;
+      windowRects.push({ x: left, y: top, width: right - left, height: bottom - top });
+    }
+    const point = screen.dipToScreenPoint(screen.getCursorScreenPoint());
+    const cx = (point.x - origin.x) * sx;
+    const cy = (point.y - origin.y) * sy;
+    const cursor =
+      cx >= 0 && cy >= 0 && cx < capture.width && cy < capture.height
+        ? { x: Math.round(cx), y: Math.round(cy) }
+        : null;
+    return { windowRects, cursor };
   }
 
   /**
@@ -681,6 +780,68 @@ export class ScreenshotController {
       if (!this.fromOverlay(event)) return;
       this.startLongCapture(rect);
     });
+
+    ipcMain.on("screenshot:record-start", (event, payload: unknown) => {
+      if (!this.fromOverlay(event)) return;
+      void this.startRecording(payload);
+    });
+
+    ipcMain.on("screenshot:record-stop", (event) => {
+      if (!this.fromOverlay(event)) return;
+      this.closeOverlay();
+      void this.recorder.stop();
+    });
+  }
+
+  /** Push the current recording status to the overlay (no-op if it is gone). */
+  private sendRecordState(): void {
+    const overlay = this.overlay;
+    if (!overlay || overlay.isDestroyed()) return;
+    overlay.webContents.send("screenshot:record-state", this.recorder.status());
+  }
+
+  /**
+   * Start a screen recording over the given region (image physical pixels,
+   * relative to the capture display, same as long capture). The overlay is
+   * closed first and capture begins only after it has had time to disappear.
+   * RecordController shows its own errors, so failures are only swallowed here.
+   */
+  private async startRecording(payload: unknown): Promise<void> {
+    const overlay = this.overlay;
+    const display = this.captureDisplayInfo;
+    if (!overlay || overlay.isDestroyed() || !display) return;
+
+    const data = (payload ?? {}) as Partial<LongCaptureRect> & { audio?: unknown };
+    const scale = display.scaleFactor || 1;
+    const maxWidth = Math.round(display.bounds.width * scale);
+    const maxHeight = Math.round(display.bounds.height * scale);
+    const numbers = [data.x, data.y, data.width, data.height];
+    if (!numbers.every((value) => typeof value === "number" && Number.isFinite(value))) return;
+    const x = Math.max(0, Math.round(data.x as number));
+    const y = Math.max(0, Math.round(data.y as number));
+    const width = Math.min(Math.round(data.width as number), maxWidth - x);
+    const height = Math.min(Math.round(data.height as number), maxHeight - y);
+    if (width < 2 || height < 2) return;
+    const audio: RecordAudioMode =
+      typeof data.audio === "string" && RECORD_AUDIO_MODES.has(data.audio)
+        ? (data.audio as RecordAudioMode)
+        : "none";
+
+    if (this.recorder.isRecording()) {
+      // The overlay shows 结束录制 while recording; treat a stale start as stop.
+      this.closeOverlay();
+      void this.recorder.stop();
+      return;
+    }
+
+    this.closeOverlay();
+    await new Promise((resolve) => setTimeout(resolve, RECORD_START_DELAY_MS));
+    if (this.recorder.isRecording()) return;
+    try {
+      await this.recorder.start({ display, rect: { x, y, width, height }, audio });
+    } catch {
+      // RecordController already reported the error and cleaned up.
+    }
   }
 
   /**

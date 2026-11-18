@@ -42,6 +42,12 @@ test("截图 / screenshot / jt hit 截图", () => {
   assert.ok(ids("jt").includes("builtin:screenshot"), "jt 首字母");
 });
 
+test("录屏 / lp / record hit 录屏", () => {
+  assert.equal(ids("录屏")[0], "builtin:record", "录屏 排第一");
+  assert.ok(ids("lp").includes("builtin:record"), "lp 首字母");
+  assert.ok(ids("record").includes("builtin:record"), "record");
+});
+
 test("设置 / settings hit 设置", () => {
   assert.ok(ids("设置").includes("builtin:settings"), "设置");
   assert.ok(ids("settings").includes("builtin:settings"), "settings");

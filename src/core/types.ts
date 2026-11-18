@@ -163,6 +163,7 @@ export interface BuiltinMatch {
     | "focus-window"
     | "window-search"
     | "screenshot"
+    | "record"
     | "plugins"
     | "hosts"
     | "diff"

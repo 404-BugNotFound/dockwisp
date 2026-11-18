@@ -38,6 +38,9 @@ const api = window.screenshot || {
   longStart() {},
   onLongResult() {},
   onLongCancel() {},
+  recordStart() {},
+  recordStop() {},
+  onRecordState() {},
 };
 
 const root = document.getElementById("root");
@@ -50,11 +53,19 @@ const toolbar = document.getElementById("toolbar");
 const subbar = document.getElementById("subbar");
 const subArrow = document.getElementById("subArrow");
 const subContent = document.getElementById("subContent");
+const recordBtn = document.getElementById("record");
+const recordPop = document.getElementById("recordPop");
+const recordArrow = document.getElementById("recordArrow");
 const toast = document.getElementById("toast");
 const maskTop = document.getElementById("maskTop");
 const maskBottom = document.getElementById("maskBottom");
 const maskLeft = document.getElementById("maskLeft");
 const maskRight = document.getElementById("maskRight");
+// 无选区时的“悬停框”：高亮鼠标所在窗体（或全屏），左键单击即采用为选区。
+const hoverEl = document.createElement("div");
+hoverEl.id = "hoverBox";
+hoverEl.hidden = true;
+maskRight.after(hoverEl);
 const ocrBoxes = document.getElementById("ocrBoxes");
 const transLoading = document.getElementById("transLoading");
 const transToggle = document.getElementById("transToggle");
@@ -81,6 +92,8 @@ const tctx = trans.getContext("2d");
 /* ------------------------------ 配置 ------------------------------ */
 
 const MIN_SELECTION_CSS = 8;
+// 按下后移动不超过该距离（CSS px）视为单击，采用悬停框。
+const CLICK_SLOP_CSS = 4;
 
 // 颜色调色板（红为默认）。
 const PALETTE = ["#f5222d", "#fa8c16", "#fadb14", "#52c41a", "#1890ff", "#ffffff", "#000000"];
@@ -125,12 +138,21 @@ let natH = 0;
 
 let selection = null; // { x, y, w, h } —— 原始像素
 let selectionVersion = 0;
+// 顶层窗口矩形（原始像素，Z 序从上到下），由主进程随截图推送。
+let windowRects = [];
+// 悬停框跟随的指针位置（原始像素）；null 表示未知，悬停框取全屏。
+let hoverPoint = null;
 let annotations = [];
 let selectedIndex = -1; // 当前选中的已完成标注下标（-1 无）
 let activeTool = null; // rect|ellipse|arrow|pen|mosaic|text|emoji|null
 
 // 长图模式。
 let longMode = false;
+// 从启动器“录屏”进入：首次确认选区后自动打开录屏弹层（只触发一次）。
+let recordIntent = false;
+
+// 录屏状态（主进程推送）：录制中工具栏“录屏”变为“结束录制”。
+let recState = { recording: false, active: false, paused: false, elapsedMs: 0 };
 
 // 译文层数据。
 let transLayer = null; // { paragraphs:[{box,text}], info:{src,dst,provider} }
@@ -229,6 +251,12 @@ api.onState((state) => {
   if (!state || (!state.pixels && typeof state.imageUrl !== "string")) return;
   resetAll();
   updateView();
+  recordIntent = state.recordIntent === true;
+  windowRects = sanitizeWindowRects(state.windowRects);
+  hoverPoint =
+    state.cursor && Number.isFinite(state.cursor.x) && Number.isFinite(state.cursor.y)
+      ? { x: state.cursor.x, y: state.cursor.y }
+      : null;
   const token = ++stateToken;
 
   if (state.pixels) {
@@ -254,6 +282,34 @@ api.onState((state) => {
       notifyReady();
     });
 });
+
+function sanitizeWindowRects(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const r of list) {
+    if (!r) continue;
+    const { x, y, width, height } = r;
+    if (![x, y, width, height].every(Number.isFinite) || width < 1 || height < 1) continue;
+    out.push({ x, y, w: width, h: height });
+  }
+  return out;
+}
+
+/** 包含 p 的最上层窗口矩形（裁剪到图片范围）；无则全屏。 */
+function hoverRectAt(p) {
+  const full = { x: 0, y: 0, w: natW, h: natH };
+  if (!p) return full;
+  for (const r of windowRects) {
+    if (p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h) {
+      const x = clamp(r.x, 0, natW);
+      const y = clamp(r.y, 0, natH);
+      const w = clamp(r.x + r.w, 0, natW) - x;
+      const h = clamp(r.y + r.h, 0, natH) - y;
+      if (w >= 1 && h >= 1) return { x, y, w, h };
+    }
+  }
+  return full;
+}
 
 function showBase(source, width, height) {
   natW = width;
@@ -314,10 +370,13 @@ function resetAll() {
   mosaicCache = null;
   selection = null;
   selectionVersion += 1;
+  windowRects = [];
+  hoverPoint = null;
   annotations = [];
   selectedIndex = -1;
   activeTool = null;
   longMode = false;
+  recordIntent = false;
   transLayer = null;
   transVisible = false;
   translating = false;
@@ -338,8 +397,11 @@ function resetAll() {
   pointer.annoOrigin = null;
   pointer.preSnapshot = null;
   pointer.moved = false;
+  pointer.hoverPick = null;
 
   // DOM 复位。
+  root.dataset.hovering = "false";
+  hoverEl.hidden = true;
   root.dataset.entering = "true";
   root.dataset.mode = "idle";
   root.dataset.toolActive = "false";
@@ -352,6 +414,7 @@ function resetAll() {
   selEl.hidden = true;
   toolbar.hidden = true;
   subbar.hidden = true;
+  closeRecordPop();
   panel.hidden = true;
   toast.hidden = true;
   toast.classList.remove("show");
@@ -415,7 +478,7 @@ for (const btn of document.querySelectorAll("#tools .tb-btn")) {
   btn.addEventListener("click", () => setTool(btn.dataset.tool));
 }
 
-for (const stop of [toolbar, subbar, panel, transToggle]) {
+for (const stop of [toolbar, subbar, panel, transToggle, recordPop]) {
   stop.addEventListener("pointerdown", (e) => e.stopPropagation());
 }
 
@@ -475,6 +538,8 @@ function syncToolbar() {
   ocrBtn.setAttribute("aria-pressed", ocrLayout ? "true" : "false");
   // 长图模式禁用“长截图”按钮。
   document.getElementById("long").disabled = longMode;
+  // 长图是拼接后的静态图，不能录屏；但录制中始终可以“结束录制”。
+  recordBtn.disabled = longMode && !recState.recording;
 }
 
 /* --------------------------- 二级栏 --------------------------- */
@@ -613,6 +678,7 @@ root.addEventListener("contextmenu", (e) => {
     return;
   }
   if (selection) {
+    hoverPoint = toImageCoords(e);
     selection = null;
     selectionVersion += 1;
     annotations = [];
@@ -728,13 +794,18 @@ function onPointerDown(ev) {
     return;
   }
 
-  // 5) 其它 → 重新拉选区。
+  // 5) 其它 → 重新拉选区；未拖动就松开则采用按下处的悬停框。
   selectedIndex = -1;
   invalidateSelectionState(true);
+  hoverPoint = p;
+  pointer.hoverPick = hoverRectAt(p);
+  pointer.moved = false;
+  pointer.startClientX = ev.clientX;
+  pointer.startClientY = ev.clientY;
   pointer.mode = "creating";
   pointer.startX = p.x;
   pointer.startY = p.y;
-  selection = { x: p.x, y: p.y, w: 0, h: 0 };
+  selection = null;
   root.dataset.mode = "dragging";
   render();
 }
@@ -742,7 +813,7 @@ function onPointerDown(ev) {
 /** 马赛克工具下，在选区内用圆圈显示笔刷大小（随鼠标移动）。 */
 function updateBrushCursor(ev) {
   const overUi = !!ev && ev.target instanceof Element &&
-    !!ev.target.closest("#toolbar, #subbar, #panel, #transToggle");
+    !!ev.target.closest("#toolbar, #subbar, #panel, #transToggle, #recordPop");
   const on =
     !!ev && !overUi && activeTool === "mosaic" && imageReady && !!selection &&
     insideSelection(toImageCoords(ev)) && textEditor.hidden;
@@ -762,10 +833,23 @@ window.addEventListener("pointerleave", () => updateBrushCursor(null));
 
 function onPointerMove(ev) {
   updateBrushCursor(ev);
-  if (pointer.mode === "idle") return;
+  if (pointer.mode === "idle") {
+    if (imageReady && !longMode && !selection) {
+      hoverPoint = toImageCoords(ev);
+      renderHover();
+    }
+    return;
+  }
   const p = toImageCoords(ev);
 
   if (pointer.mode === "creating") {
+    if (!pointer.moved) {
+      const dx = ev.clientX - pointer.startClientX;
+      const dy = ev.clientY - pointer.startClientY;
+      if (dx * dx + dy * dy < CLICK_SLOP_CSS * CLICK_SLOP_CSS) return;
+      pointer.moved = true;
+      pointer.hoverPick = null;
+    }
     selection = normalizeRect(pointer.startX, pointer.startY, p.x, p.y);
     render();
   } else if (pointer.mode === "moving") {
@@ -799,21 +883,31 @@ function onPointerMove(ev) {
 
 function onPointerUp() {
   if (pointer.mode === "idle") return;
+  const wasCreating = pointer.mode === "creating";
 
   if (pointer.mode === "creating") {
-    if (
+    const pick = pointer.hoverPick;
+    pointer.hoverPick = null;
+    if (!pointer.moved && pick) {
+      // 单击：把悬停框确定为选区。
+      selection = { ...pick };
+      selectionVersion += 1;
+    } else if (
       !selection ||
       selection.w * view.sx < MIN_SELECTION_CSS ||
       selection.h * view.sy < MIN_SELECTION_CSS
     ) {
+      // 拖出的框过小：回到悬停态，不关闭。
       selection = null;
       pointer.mode = "idle";
       pointer.handle = null;
       pointer.originSel = null;
+      pointer.moved = false;
       root.dataset.mode = "idle";
-      api.close();
+      render();
       return;
     }
+    pointer.moved = false;
   } else if (pointer.mode === "drawing" && pointer.draft) {
     if (draftIsValid(pointer.draft)) {
       pushHistory();
@@ -844,6 +938,11 @@ function onPointerUp() {
   pointer.originSel = null;
   root.dataset.mode = longMode ? "idle" : "idle";
   render();
+  if (wasCreating && recordIntent && selection) {
+    // 选区刚确认、工具栏刚出现：直接弹出录屏选项。
+    recordIntent = false;
+    openRecordPop();
+  }
 }
 
 function normalizeRect(x0, y0, x1, y1) {
@@ -945,6 +1044,7 @@ function render() {
   } else {
     selEl.hidden = true;
   }
+  renderHover();
 
   // 译文层可见性。
   trans.hidden = !(transVisible && transLayer);
@@ -969,6 +1069,32 @@ function setBox(el, x, y, w, h) {
   el.style.transform = `translate(${x}px, ${y}px)`;
   el.style.width = `${w}px`;
   el.style.height = `${h}px`;
+}
+
+/** 无选区时用 4 块遮罩高亮悬停框（鼠标所在窗体或全屏）。 */
+function renderHover() {
+  const hasSel = !!(selection && selection.w > 0 && selection.h > 0);
+  const active =
+    imageReady &&
+    !longMode &&
+    !hasSel &&
+    (pointer.mode === "idle" || (pointer.mode === "creating" && !pointer.moved));
+  root.dataset.hovering = active ? "true" : "false";
+  if (!active) {
+    hoverEl.hidden = true;
+    return;
+  }
+  const r = (pointer.mode === "creating" && pointer.hoverPick) || hoverRectAt(hoverPoint);
+  const l = vx(r.x);
+  const t = vy(r.y);
+  const w = r.w * view.sx;
+  const h = r.h * view.sy;
+  setBox(maskTop, 0, 0, viewW, t);
+  setBox(maskBottom, 0, t + h, viewW, Math.max(0, viewH - t - h));
+  setBox(maskLeft, 0, t, l, h);
+  setBox(maskRight, l + w, t, Math.max(0, viewW - l - w), h);
+  setBox(hoverEl, l, t, w, h);
+  hoverEl.hidden = false;
 }
 
 function drawAnnotations() {
@@ -1332,6 +1458,7 @@ function positionToolbar(hasSel) {
   if (!hasSel && !longMode) {
     toolbar.hidden = true;
     subbar.hidden = true;
+    closeRecordPop();
     return;
   }
   toolbar.hidden = false;
@@ -1381,6 +1508,7 @@ function positionToolbar(hasSel) {
   toolbar.dataset.top = String(top);
   toolbar.dataset.h = String(tbH);
   positionSubbar();
+  positionRecordPop();
 }
 
 function positionSubbar() {
@@ -2780,6 +2908,209 @@ if (typeof api.onLongCancel === "function") {
   });
 }
 
+/* --------------------------- 录屏 --------------------------- */
+
+const RECORD_AUDIO_KEY = "dockwisp.screenshot.recordAudio";
+const RECORD_AUDIO_MODES = ["none", "system", "system+mic"];
+const recordOptions = Array.from(recordPop.querySelectorAll(".rec-option"));
+
+function loadRecordAudio() {
+  try {
+    const saved = localStorage.getItem(RECORD_AUDIO_KEY);
+    if (RECORD_AUDIO_MODES.includes(saved)) return saved;
+  } catch {
+    /* localStorage 不可用时用默认值 */
+  }
+  return "none";
+}
+
+let recordAudio = loadRecordAudio();
+
+function setRecordAudio(mode) {
+  if (!RECORD_AUDIO_MODES.includes(mode)) return;
+  recordAudio = mode;
+  for (const btn of recordOptions) {
+    const on = btn.dataset.audio === mode;
+    btn.setAttribute("aria-checked", on ? "true" : "false");
+    btn.tabIndex = on ? 0 : -1;
+  }
+  try {
+    localStorage.setItem(RECORD_AUDIO_KEY, mode);
+  } catch {
+    /* 忽略 */
+  }
+}
+
+function openRecordPop() {
+  if (longMode || !selection || recordBtn.disabled) return;
+  if (typeof api.recordStart !== "function") {
+    showToast("当前版本不支持录屏");
+    return;
+  }
+  // 弹层与画图二级栏共用工具栏下方的位置，先收起工具。
+  commitTextEditor();
+  if (activeTool) setTool(activeTool);
+  setRecordAudio(recordAudio);
+  recordPop.hidden = false;
+  recordBtn.setAttribute("aria-expanded", "true");
+  positionRecordPop();
+  const current = recordOptions.find((b) => b.dataset.audio === recordAudio);
+  (current || recordOptions[0]).focus({ preventScroll: true });
+}
+
+function closeRecordPop() {
+  if (recordPop.hidden) return;
+  recordPop.hidden = true;
+  recordBtn.setAttribute("aria-expanded", "false");
+}
+
+function positionRecordPop() {
+  if (recordPop.hidden) return;
+  const tbTop = parseFloat(toolbar.dataset.top || "0");
+  const tbH = parseFloat(toolbar.dataset.h || "40");
+  const pw = recordPop.offsetWidth;
+  const ph = recordPop.offsetHeight;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const r = recordBtn.getBoundingClientRect();
+  const cx = r.left + r.width / 2;
+
+  // 水平居中于录屏按钮，放不下贴边；垂直优先工具栏下方。
+  const left = clamp(cx - pw / 2, 8, vw - pw - 8);
+  let top = tbTop + tbH + 8;
+  let side = "below";
+  if (top + ph > vh - 4) {
+    top = tbTop - 8 - ph;
+    side = "above";
+  }
+  recordPop.style.left = `${left}px`;
+  recordPop.style.top = `${Math.max(4, top)}px`;
+  recordPop.dataset.side = side;
+  const arrowX = clamp(cx - left - 6, 10, pw - 22);
+  recordArrow.style.left = `${arrowX}px`;
+  recordPop.style.setProperty("--pop-origin", `${arrowX + 6}px ${side === "below" ? "0" : "100%"}`);
+  recordPop.style.setProperty("--pop-shift", side === "below" ? "-4px" : "4px");
+}
+
+function startRecord() {
+  if (longMode || !selection || typeof api.recordStart !== "function") return;
+  closeRecordPop();
+  api.recordStart({
+    x: Math.round(selection.x),
+    y: Math.round(selection.y),
+    width: Math.round(selection.w),
+    height: Math.round(selection.h),
+    audio: recordAudio,
+  });
+}
+
+recordBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+recordBtn.addEventListener("click", () => {
+  if (recState.recording) {
+    stopRecordFromOverlay();
+    return;
+  }
+  if (recordPop.hidden) openRecordPop();
+  else closeRecordPop();
+});
+for (const btn of recordOptions) {
+  btn.addEventListener("click", () => setRecordAudio(btn.dataset.audio));
+  btn.addEventListener("dblclick", startRecord);
+}
+recordPop.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    e.stopPropagation();
+    const i = RECORD_AUDIO_MODES.indexOf(recordAudio);
+    const step = e.key === "ArrowDown" ? 1 : -1;
+    const next = RECORD_AUDIO_MODES[(i + step + RECORD_AUDIO_MODES.length) % RECORD_AUDIO_MODES.length];
+    setRecordAudio(next);
+    const btn = recordOptions.find((b) => b.dataset.audio === next);
+    if (btn) btn.focus({ preventScroll: true });
+  } else if (e.key === "Enter") {
+    // 弹层内回车 = 开始录制，不触发“复制并关闭”。
+    e.preventDefault();
+    e.stopPropagation();
+    startRecord();
+  }
+});
+document.getElementById("recordStart").addEventListener("click", startRecord);
+// 捕获阶段监听：工具栏等会拦截冒泡的 pointerdown。
+document.addEventListener(
+  "pointerdown",
+  (e) => {
+    if (recordPop.hidden) return;
+    const t = e.target;
+    if (t instanceof Node && (recordPop.contains(t) || recordBtn.contains(t))) return;
+    closeRecordPop();
+  },
+  true,
+);
+/* 录屏进行中：顶部“结束录制”胶囊 + 工具栏按钮变为“结束录制”。 */
+const recLive = document.getElementById("recLive");
+const recLiveTime = document.getElementById("recLiveTime");
+const recLiveStop = document.getElementById("recLiveStop");
+const recordLabel = document.getElementById("recordLabel");
+let recStateAt = 0;
+let recTimer = null;
+
+function formatRecTime(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const mm = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
+  const ss = String(total % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+function renderRecTime() {
+  const running = recState.active && !recState.paused;
+  const ms = recState.elapsedMs + (running ? performance.now() - recStateAt : 0);
+  recLiveTime.textContent = formatRecTime(ms);
+}
+
+function setRecState(state) {
+  recState = {
+    recording: !!(state && state.recording),
+    active: !!(state && state.active),
+    paused: !!(state && state.paused),
+    elapsedMs: state && Number.isFinite(state.elapsedMs) ? state.elapsedMs : 0,
+  };
+  recStateAt = performance.now();
+  root.dataset.recording = recState.recording ? "true" : "false";
+  recLive.hidden = !recState.recording;
+  recLive.classList.toggle("paused", recState.paused);
+  recLive.querySelector(".rec-live-label").textContent = !recState.active
+    ? "录屏处理中"
+    : recState.paused
+      ? "录屏已暂停"
+      : "正在录屏";
+  recLiveStop.disabled = !recState.active;
+  recordLabel.textContent = recState.recording ? "结束录制" : "录屏";
+  recordBtn.title = recState.recording ? "结束当前录制" : "录制选区";
+  recordBtn.setAttribute("aria-haspopup", recState.recording ? "false" : "dialog");
+  if (recState.recording) closeRecordPop();
+  renderRecTime();
+  if (recState.recording && !recTimer) {
+    recTimer = setInterval(renderRecTime, 250);
+  } else if (!recState.recording && recTimer) {
+    clearInterval(recTimer);
+    recTimer = null;
+  }
+  syncToolbar();
+}
+
+function stopRecordFromOverlay() {
+  if (!recState.recording || typeof api.recordStop !== "function") return;
+  recLiveStop.disabled = true;
+  api.recordStop();
+}
+
+recLive.addEventListener("pointerdown", (e) => e.stopPropagation());
+recLiveStop.addEventListener("click", stopRecordFromOverlay);
+if (typeof api.onRecordState === "function") {
+  api.onRecordState((state) => setRecState(state));
+}
+
 /* 进入长图编辑模式：长图作为新底图，contain 居中显示。 */
 function enterLongMode(result) {
   const { pixels, width, height } = result;
@@ -2993,6 +3324,12 @@ window.addEventListener("keydown", async (e) => {
     e.target === textEditor || (e.target instanceof Element && e.target.matches(".lang-select"));
 
   if (e.key === "Escape") {
+    if (!recordPop.hidden) {
+      e.preventDefault();
+      closeRecordPop();
+      recordBtn.focus({ preventScroll: true });
+      return;
+    }
     if (!textEditor.hidden) {
       e.preventDefault();
       cancelTextEditor();

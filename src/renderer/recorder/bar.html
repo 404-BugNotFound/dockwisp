@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self'; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>录屏控制</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="bar.js" defer></script>
+  </head>
+  <body>
+    <div id="bar">
+      <span id="dot"></span>
+      <span id="time">00:00</span>
+      <button id="pause" type="button">暂停</button>
+      <button id="stop" type="button" class="danger">停止</button>
+    </div>
+  </body>
+</html>
