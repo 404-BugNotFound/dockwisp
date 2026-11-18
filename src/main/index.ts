@@ -2584,10 +2584,22 @@ void app.whenReady().then(async () => {
   });
   ipcMain.handle("toggles:list", () => listQuickToggles());
   ipcMain.handle("toggles:set", async (_event, id: unknown, enabled: unknown) => {
+    // UAC prompts and Explorer restarts take focus away; keep the hub open so the
+    // user can see the result. The guard stays up briefly after the call because a
+    // restarted Explorer can grab the foreground a moment later.
+    launcherDialogDepth += 1;
     try {
       return { ok: true, state: await setQuickToggle(id, enabled) };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      if (launcher && !launcher.isDestroyed() && launcher.isVisible()) {
+        launcher.focus();
+        focusLauncher();
+      }
+      setTimeout(() => {
+        launcherDialogDepth -= 1;
+      }, 2_000);
     }
   });
   ipcMain.handle("launcher:reset-position", () => {
