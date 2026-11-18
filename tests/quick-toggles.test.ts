@@ -124,6 +124,7 @@ test("admin flags, after-actions and Win11 gating match the table", () => {
     "block-auto-update",
     "disable-fast-startup",
     "disable-hibernation",
+    "disable-web-search",
     "enable-long-paths",
     "exclude-driver-updates",
   ]);
@@ -166,6 +167,9 @@ test("start menu, tips and game bar toggles generate the expected commands", () 
     ["reg.exe", "add", "HKCU\\Software\\Policies\\Microsoft\\Windows\\Explorer", "/v", "DisableSearchBoxSuggestions", "/t", "REG_DWORD", "/d", "1", "/f"],
     ["reg.exe", "add", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Search", "/v", "BingSearchEnabled", "/t", "REG_DWORD", "/d", "0", "/f"],
   ]);
+  // BingSearchEnabled is best effort: its failure must not fail the toggle.
+  assert.equal(commandFor(opsFor(def("disable-web-search"), true)[1]).ignoreFailure, true);
+  assert.equal(commandFor(opsFor(def("disable-web-search"), true)[0]).ignoreFailure, false);
   assert.deepEqual(regArgs("start-no-recommendations", false), [
     ["reg.exe", "delete", ADVANCED, "/v", "Start_IrisRecommendations", "/f"],
     ["reg.exe", "delete", ADVANCED, "/v", "Start_AccountNotifications", "/f"],

@@ -78,7 +78,7 @@ export type RegValueType = "REG_DWORD" | "REG_SZ";
 
 export type ToggleOp =
   /** `name: null` targets the key's default value (`/ve`). */
-  | { kind: "regAdd"; key: string; name: string | null; type: RegValueType; data: string }
+  | { kind: "regAdd"; key: string; name: string | null; type: RegValueType; data: string; optional?: boolean }
   /** Without `name` the whole key is deleted. */
   | { kind: "regDelete"; key: string; name?: string }
   | { kind: "stickyHotkey"; active: boolean }
@@ -214,11 +214,17 @@ export const QUICK_TOGGLE_DEFS: readonly QuickToggleDef[] = [
   {
     id: "disable-web-search",
     label: "禁用开始菜单网络搜索",
-    admin: false,
+    // HKCU\Software\Policies only grants the user read access, so writing it needs elevation.
+    admin: true,
     after: "restartExplorer",
     keys: [SEARCH_POLICY_KEY],
     read: isNum(SEARCH_POLICY_KEY, "DisableSearchBoxSuggestions", 1),
-    on: [dword(SEARCH_POLICY_KEY, "DisableSearchBoxSuggestions", 1), dword(SEARCH_KEY, "BingSearchEnabled", 0)],
+    // The policy alone turns off web results; BingSearchEnabled is a best-effort extra
+    // because some builds lock the Search key even for administrators.
+    on: [
+      dword(SEARCH_POLICY_KEY, "DisableSearchBoxSuggestions", 1),
+      { kind: "regAdd", key: SEARCH_KEY, name: "BingSearchEnabled", type: "REG_DWORD", data: "0", optional: true },
+    ],
     off: [delValue(SEARCH_POLICY_KEY, "DisableSearchBoxSuggestions"), delValue(SEARCH_KEY, "BingSearchEnabled")],
   },
   {
@@ -447,7 +453,7 @@ export function commandFor(op: ToggleOp): CommandSpec {
       else args.push("/v", op.name);
       // execFile passes an empty argument as "", so `/d ""` reaches reg.exe intact.
       args.push("/t", op.type, "/d", op.data, "/f");
-      return { file: "reg.exe", args };
+      return { file: "reg.exe", args, ignoreFailure: op.optional === true };
     }
     case "regDelete": {
       const args = ["delete", op.key];

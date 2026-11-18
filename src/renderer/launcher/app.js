@@ -1228,7 +1228,7 @@ const QUICK_TOGGLE_SECTIONS = [
   {
     title: "开始菜单与任务栏",
     items: [
-      { id: "disable-web-search", title: "关闭开始菜单网页搜索", description: "开始菜单只搜索本机内容，不再混入 Bing 结果", effect: "重启资源管理器" },
+      { id: "disable-web-search", title: "关闭开始菜单网页搜索", description: "开始菜单只搜索本机内容，不再混入 Bing 结果", effect: "重启资源管理器", admin: true },
       { id: "clock-seconds", title: "任务栏时钟显示秒", description: "任务栏右下角的时钟精确到秒", effect: "重启资源管理器" },
       { id: "start-no-recommendations", title: "关闭开始菜单推荐和广告", description: "去掉“推荐”区的应用推广、提示和账户通知", effect: "重启资源管理器" },
       { id: "disable-tips", title: "关闭提示与建议", description: "关闭锁屏趣闻、设置页推荐内容和“充分利用 Windows”等弹窗" },
@@ -1371,7 +1371,7 @@ function renderQuickToggles(byId) {
     grid.className = "quick-toggle-grid";
     grid.setAttribute("role", "list");
     grid.setAttribute("aria-label", section.title);
-    grid.append(...section.items.map((def) => createQuickToggleRow(def, byId.get(def.id), Boolean(section.admin))));
+    grid.append(...section.items.map((def) => createQuickToggleRow(def, byId.get(def.id), Boolean(section.admin || def.admin))));
     block.append(heading, grid);
     return block;
   });
